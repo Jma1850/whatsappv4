@@ -137,26 +137,44 @@ app.post("/webhook", async (req, res) => {
 
     const step = userData?.language_step;
 
-    if (step === "source" && bodyText && LANGUAGE_OPTIONS[bodyText]) {
+    // --- helper to match numeric or language text -----------------
+    const matchChoice = (input) => {
+      const clean = input.toLowerCase().trim();
+      return Object.entries(LANGUAGE_OPTIONS).find(([num, val]) =>
+        clean === num || clean === val.code || clean === val.name.toLowerCase()
+      );
+    };
+
+    // ---------- SOURCE LANGUAGE STEP ----------------------------
+    const sourceMatch = matchChoice(bodyText || "");
+    if (step === "source" && sourceMatch) {
+      const [, src] = sourceMatch;
       await supabase.from("users").update({
-        source_lang: LANGUAGE_OPTIONS[bodyText].code,
+        source_lang: src.code,
         language_step: "target"
       }).eq("phone_number", from);
 
-      let prompt = `✅ Got it! What language should I translate messages into?\n\n`;
+      let prompt = `✅ Got it! What language should I translate messages into?
+
+`;
       for (const [key, val] of Object.entries(LANGUAGE_OPTIONS)) {
-        prompt += `${key}️⃣ ${val.name} (${val.code})\n`;
+        prompt += `${key}️⃣ ${val.name} (${val.code})
+`;
       }
       return res.send(`<Response><Message>${prompt}</Message></Response>`);
     }
 
-    if (step === "target" && bodyText && LANGUAGE_OPTIONS[bodyText]) {
+    // ---------- TARGET LANGUAGE STEP ----------------------------
+    const targetMatch = matchChoice(bodyText || "");
+    if (step === "target" && targetMatch) {
+      const [, tgt] = targetMatch;
       await supabase.from("users").update({
-        target_lang: LANGUAGE_OPTIONS[bodyText].code,
+        target_lang: tgt.code,
         language_step: "done"
       }).eq("phone_number", from);
 
       return res.send(`<Response><Message>✅ You're all set! You can now send voice notes or text messages to translate.</Message></Response>`);
+    }
     }
 
     if (step !== "done") {
