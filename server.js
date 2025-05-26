@@ -136,7 +136,6 @@ app.post("/webhook", async (req, res) => {
     }
 
     const step = userData?.language_step;
-    }
 
     if (step === "source" && bodyText && LANGUAGE_OPTIONS[bodyText]) {
       await supabase.from("users").update({
