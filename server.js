@@ -46,9 +46,13 @@ const LANGUAGE_OPTIONS = {
 // HELPERS
 // ------------------------------------------------------------------
 const matchChoice = (input = "") => {
-  const clean = input.toLowerCase().trim();
-  return Object.entries(LANGUAGE_OPTIONS).find(([key, val]) =>
-    clean === key || clean === val.code || clean === val.name.toLowerCase()
+  const clean = input.trim().toLowerCase();
+  // numeric choice (handles "1", "1️⃣", etc.)
+  const num = clean.match(/^[0-9]/)?.[0];
+  if (num && LANGUAGE_OPTIONS[num]) return [num, LANGUAGE_OPTIONS[num]];
+  // text or language code
+  return Object.entries(LANGUAGE_OPTIONS).find(([k, v]) =>
+    clean === v.code || clean === v.name.toLowerCase()
   );
 };
 
