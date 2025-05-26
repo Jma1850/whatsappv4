@@ -1,4 +1,4 @@
-// server.js – Smart WhatsApp Translator Bot (Voice + Text)
+// server.js – Smart WhatsApp Translator Bot (Voice + Text + Guided Language Setup)
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -57,17 +57,6 @@ async function translateText(text, targetLang = "en") {
   return data.data.translations[0].translatedText;
 }
 
-async function detectLanguage(text) {
-  const url = `https://translation.googleapis.com/language/translate/v2/detect?key=${GOOGLE_TRANSLATE_KEY}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: text })
-  });
-  const data = await res.json();
-  return data.data.detections[0][0].language;
-}
-
 async function generateSpeech(text, langCode = "es") {
   const response = await fetch(
     `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,
@@ -102,6 +91,13 @@ async function uploadToSupabase(filePath, filename) {
   return `${SUPABASE_URL}/storage/v1/object/public/tts-voices/${filename}`;
 }
 
+const LANGUAGE_OPTIONS = {
+  1: { name: "English", code: "en" },
+  2: { name: "French", code: "fr" },
+  3: { name: "Portuguese", code: "pt" },
+  4: { name: "German", code: "de" }
+};
+
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -113,14 +109,31 @@ app.post("/webhook", async (req, res) => {
   const mediaType = req.body.MediaContentType0;
 
   try {
-    const { data: userData } = await supabase
+    let { data: userData } = await supabase
       .from("users")
-      .select("preferred_lang, last_target_lang")
+      .select("preferred_lang, last_target_lang, source_lang, target_lang, is_setup_complete")
       .eq("phone_number", from)
       .single();
 
+    // First-time setup: handle language selection response
+    if (bodyText && !isNaN(bodyText) && userData && !userData.is_setup_complete) {
+      const selected = LANGUAGE_OPTIONS[bodyText];
+      if (selected) {
+        await supabase.from("users").update({
+          target_lang: selected.code,
+          preferred_lang: selected.code,
+          is_setup_complete: true
+        }).eq("phone_number", from);
+
+        return res.send(`<Response><Message>✅ Great! Your messages will now be translated to ${selected.name} (${selected.code.toUpperCase()}). You can send a voice note now.</Message></Response>`);
+      }
+    }
+
     const preferredLang = userData?.preferred_lang || "en";
     const lastTargetLang = userData?.last_target_lang || "es";
+    const sourceLangFixed = userData?.source_lang;
+    const targetLangFixed = userData?.target_lang;
+    const isSetup = userData?.is_setup_complete;
 
     if (mediaUrl && mediaType.startsWith("audio")) {
       const authHeader =
@@ -133,37 +146,62 @@ app.post("/webhook", async (req, res) => {
       fs.writeFileSync(inputPath, await audioRes.buffer());
 
       await convertAudio(inputPath, outputPath);
-      const { text: transcript, lang: sourceLang } = await transcribeAudio(outputPath);
-      const translated = await translateText(transcript, preferredLang);
+      const { text: transcript, lang: detectedLang } = await transcribeAudio(outputPath);
 
-      await supabase.from("users").update({ last_target_lang: sourceLang }).eq("phone_number", from);
+      // If user not set up yet, prompt for target language selection
+      if (!isSetup) {
+        await supabase.from("users").upsert({
+          phone_number: from,
+          source_lang: detectedLang,
+          preferred_lang: null,
+          target_lang: null,
+          is_setup_complete: false
+        }, { onConflict: "phone_number" });
 
-      res.set("Content-Type", "text/xml");
-      return res.send(`
-        <Response>
-          <Message>
-🎤 Heard (${sourceLang || "unknown"}): ${transcript}
+        let prompt = `🎤 I detected ${detectedLang.toUpperCase()}.
+What language would you like replies in?\n\n`;
+        for (const [key, val] of Object.entries(LANGUAGE_OPTIONS)) {
+          prompt += `${key}️⃣ ${val.name} (${val.code})\n`;
+        }
 
-🌎 Translated (${preferredLang}): ${translated}
+        res.set("Content-Type", "text/xml");
+        return res.send(`<Response><Message>${prompt}</Message></Response>`);
+      }
 
-🔁 Reply with a voice note and I’ll translate it back into ${sourceLang?.toUpperCase() || "SPANISH"}.
-          </Message>
-        </Response>
-      `);
-    }
-
-    if (bodyText) {
-      const detectedLang = await detectLanguage(bodyText);
-      const targetLang = lastTargetLang;
-      const translated = await translateText(bodyText, targetLang);
-      const ttsPath = await generateSpeech(translated, targetLang);
+      const translated = await translateText(transcript, targetLangFixed || preferredLang);
+      const ttsPath = await generateSpeech(translated, targetLangFixed || preferredLang);
       const filename = `tts_${Date.now()}.mp3`;
       const publicUrl = await uploadToSupabase(ttsPath, filename);
 
       await twilioClient.messages.create({
         from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
         to: from,
-        body: `📝 Translated (${targetLang}): ${translated}`,
+        body: `🎤 Heard (${detectedLang || "unknown"}): ${transcript}\n\n🌎 Translated: ${translated}`,
+        mediaUrl: [publicUrl]
+      });
+
+      return res.sendStatus(200);
+    }
+
+    // Optional: Respond to "LANGUAGE" keyword to re-prompt for selection
+    if (bodyText && bodyText.toUpperCase() === "LANGUAGE") {
+      let prompt = `What language would you like replies in?\n\n`;
+      for (const [key, val] of Object.entries(LANGUAGE_OPTIONS)) {
+        prompt += `${key}️⃣ ${val.name} (${val.code})\n`;
+      }
+      return res.send(`<Response><Message>${prompt}</Message></Response>`);
+    }
+
+    if (bodyText && userData?.is_setup_complete) {
+      const translated = await translateText(bodyText, targetLangFixed || preferredLang);
+      const ttsPath = await generateSpeech(translated, targetLangFixed || preferredLang);
+      const filename = `tts_${Date.now()}.mp3`;
+      const publicUrl = await uploadToSupabase(ttsPath, filename);
+
+      await twilioClient.messages.create({
+        from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
+        to: from,
+        body: `📝 Translated: ${translated}`,
         mediaUrl: [publicUrl]
       });
 
@@ -171,19 +209,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     res.set("Content-Type", "text/xml");
-    return res.send(`
-      <Response>
-        <Message>⚠️ Unsupported message type. Please send a voice note or a text message.</Message>
-      </Response>
-    `);
+    return res.send(`<Response><Message>⚠️ Please send a voice note or text message.</Message></Response>`);
   } catch (err) {
     console.error("Webhook error:", err);
     res.set("Content-Type", "text/xml");
-    return res.send(`
-      <Response>
-        <Message>⚠️ Error processing message. Try again later.</Message>
-      </Response>
-    `);
+    return res.send(`<Response><Message>⚠️ Error processing message. Try again later.</Message></Response>`);
   }
 });
 
