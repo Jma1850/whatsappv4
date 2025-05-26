@@ -120,13 +120,22 @@ app.post("/webhook", async (req, res) => {
       .eq("phone_number", from)
       .single();
 
-    const step = userData?.language_step;
-
     if (!userData) {
       await supabase.from("users").insert({
         phone_number: from,
         language_step: "source"
       });
+
+      const { data: newUser } = await supabase
+        .from("users")
+        .select("source_lang, target_lang, language_step")
+        .eq("phone_number", from)
+        .single();
+
+      userData = newUser;
+    }
+
+    const step = userData?.language_step;
     }
 
     if (step === "source" && bodyText && LANGUAGE_OPTIONS[bodyText]) {
