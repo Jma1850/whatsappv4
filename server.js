@@ -1,4 +1,3 @@
-// server.js – WhatsApp voice translator (sandbox-compatible with lang flip)
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -23,9 +22,11 @@ const {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+// Convert any audio input to WAV (mono, 16kHz)
 function convertAudio(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
+      .audioCodec("pcm_s16le")
       .outputOptions(["-ac", "1", "-ar", "16000", "-f", "wav"])
       .on("error", reject)
       .on("end", () => resolve(outputPath))
@@ -36,7 +37,7 @@ function convertAudio(inputPath, outputPath) {
 async function transcribeAudio(wavPath) {
   const response = await openai.audio.transcriptions.create({
     model: "whisper-1",
-    file: fs.createReadStream(wavPath),
+    file: fs.createReadStream(wavPath)
   });
   return { text: response.text, lang: response.language };
 }
@@ -46,7 +47,7 @@ async function translateText(text, targetLang = "en") {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: text, target: targetLang }),
+    body: JSON.stringify({ q: text, target: targetLang })
   });
   const data = await res.json();
   return data.data.translations[0].translatedText;
@@ -64,7 +65,7 @@ async function decrementCredit(phone) {
   if (!user) {
     await supabase.from("users").insert({
       phone_number: phone,
-      credits_remaining: FREE_CREDITS_PER_USER - 1,
+      credits_remaining: FREE_CREDITS_PER_USER - 1
     });
     return FREE_CREDITS_PER_USER - 1;
   }
@@ -86,8 +87,20 @@ app.use(bodyParser.json());
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
   const mediaUrl = req.body.MediaUrl0;
+  const mediaType = req.body.MediaContentType0;
 
-  if (!mediaUrl || !from) return res.sendStatus(400);
+  // Log what’s coming in
+  console.log(`Incoming from ${from} — MediaType: ${mediaType}`);
+
+  // Gracefully handle unsupported messages
+  if (!mediaUrl || !mediaType || !mediaType.startsWith("audio")) {
+    res.set("Content-Type", "text/xml");
+    return res.send(`
+      <Response>
+        <Message>⚠️ Unsupported message type. Please send or forward a voice note.</Message>
+      </Response>
+    `);
+  }
 
   try {
     const credits = await decrementCredit(from);
@@ -100,25 +113,24 @@ app.post("/webhook", async (req, res) => {
       `);
     }
 
-    // Authenticated audio download
     const authHeader =
       "Basic " +
       Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
 
-    const inputPath = `/tmp/input_${Date.now()}.ogg`;
+    const inputPath = `/tmp/input_${Date.now()}`;
     const outputPath = `/tmp/output_${Date.now()}.wav`;
 
     const audioRes = await fetch(mediaUrl, {
-      headers: { Authorization: authHeader },
+      headers: { Authorization: authHeader }
     });
 
     if (!audioRes.ok) throw new Error("Failed to fetch media: " + audioRes.status);
+
     fs.writeFileSync(inputPath, await audioRes.buffer());
 
     await convertAudio(inputPath, outputPath);
     const { text: transcript, lang } = await transcribeAudio(outputPath);
 
-    // auto-flip translation
     let targetLang = "en";
     if (lang === "en") targetLang = "es";
 
@@ -129,7 +141,7 @@ app.post("/webhook", async (req, res) => {
       original_text: transcript,
       translated_text: translated,
       language_from: lang,
-      language_to: targetLang,
+      language_to: targetLang
     });
 
     res.set("Content-Type", "text/xml");
