@@ -95,7 +95,8 @@ const LANGUAGE_OPTIONS = {
   1: { name: "English", code: "en" },
   2: { name: "French", code: "fr" },
   3: { name: "Portuguese", code: "pt" },
-  4: { name: "German", code: "de" }
+  4: { name: "German", code: "de" },
+  5: { name: "Spanish", code: "es" }
 };
 
 const app = express();
@@ -115,13 +116,13 @@ app.post("/webhook", async (req, res) => {
       .eq("phone_number", from)
       .single();
 
-    // First-time setup: handle language selection response
     if (bodyText && !isNaN(bodyText) && userData && !userData.is_setup_complete) {
       const selected = LANGUAGE_OPTIONS[bodyText];
       if (selected) {
         await supabase.from("users").update({
           target_lang: selected.code,
           preferred_lang: selected.code,
+          source_lang: userData?.source_lang || null,
           is_setup_complete: true
         }).eq("phone_number", from);
 
@@ -148,18 +149,23 @@ app.post("/webhook", async (req, res) => {
       await convertAudio(inputPath, outputPath);
       const { text: transcript, lang: detectedLang } = await transcribeAudio(outputPath);
 
-      // If user not set up yet, prompt for target language selection
       if (!isSetup) {
         await supabase.from("users").upsert({
           phone_number: from,
-          source_lang: detectedLang,
+          source_lang: detectedLang || null,
           preferred_lang: null,
           target_lang: null,
           is_setup_complete: false
         }, { onConflict: "phone_number" });
 
-        let prompt = `🎤 I detected ${detectedLang.toUpperCase()}.
+        let prompt;
+        if (detectedLang) {
+          prompt = `🎤 I detected ${detectedLang.toUpperCase()}.
 What language would you like replies in?\n\n`;
+        } else {
+          prompt = `🤖 I couldn't detect the language.
+What language is this voice note in?\n\n`;
+        }
         for (const [key, val] of Object.entries(LANGUAGE_OPTIONS)) {
           prompt += `${key}️⃣ ${val.name} (${val.code})\n`;
         }
@@ -183,7 +189,6 @@ What language would you like replies in?\n\n`;
       return res.sendStatus(200);
     }
 
-    // Optional: Respond to "LANGUAGE" keyword to re-prompt for selection
     if (bodyText && bodyText.toUpperCase() === "LANGUAGE") {
       let prompt = `What language would you like replies in?\n\n`;
       for (const [key, val] of Object.entries(LANGUAGE_OPTIONS)) {
