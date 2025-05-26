@@ -1,4 +1,4 @@
-// server.js – Sandbox-ready WhatsApp voice translator
+// server.js – WhatsApp voice translator (sandbox-compatible with lang flip)
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -9,7 +9,6 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 dotenv.config();
 
-// ─── ENV
 const {
   SUPABASE_URL,
   SUPABASE_KEY,
@@ -21,11 +20,9 @@ const {
   PORT = 8080
 } = process.env;
 
-// ─── Clients
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ─── Convert .ogg → .wav
 function convertAudio(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
@@ -36,7 +33,6 @@ function convertAudio(inputPath, outputPath) {
   });
 }
 
-// ─── Transcription
 async function transcribeAudio(wavPath) {
   const response = await openai.audio.transcriptions.create({
     model: "whisper-1",
@@ -45,8 +41,7 @@ async function transcribeAudio(wavPath) {
   return { text: response.text, lang: response.language };
 }
 
-// ─── Translation
-async function translateText(text, targetLang = "es") {
+async function translateText(text, targetLang = "en") {
   const url = `https://translation.googleapis.com/language/translate/v2?key=${GOOGLE_TRANSLATE_KEY}`;
   const res = await fetch(url, {
     method: "POST",
@@ -57,7 +52,6 @@ async function translateText(text, targetLang = "es") {
   return data.data.translations[0].translatedText;
 }
 
-// ─── Credit Management
 async function decrementCredit(phone) {
   const { data: user, error } = await supabase
     .from("users")
@@ -85,12 +79,10 @@ async function decrementCredit(phone) {
   return newCredits;
 }
 
-// ─── Express App
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// ─── Webhook Route
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
   const mediaUrl = req.body.MediaUrl0;
@@ -108,7 +100,7 @@ app.post("/webhook", async (req, res) => {
       `);
     }
 
-    // Authenticated media download
+    // Authenticated audio download
     const authHeader =
       "Basic " +
       Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
@@ -123,13 +115,15 @@ app.post("/webhook", async (req, res) => {
     if (!audioRes.ok) throw new Error("Failed to fetch media: " + audioRes.status);
     fs.writeFileSync(inputPath, await audioRes.buffer());
 
-    // Process
     await convertAudio(inputPath, outputPath);
     const { text: transcript, lang } = await transcribeAudio(outputPath);
-    const targetLang = lang === "es" ? "en" : "es";
+
+    // auto-flip translation
+    let targetLang = "en";
+    if (lang === "en") targetLang = "es";
+
     const translated = await translateText(transcript, targetLang);
 
-    // Log
     await supabase.from("translations").insert({
       phone_number: from,
       original_text: transcript,
@@ -138,14 +132,13 @@ app.post("/webhook", async (req, res) => {
       language_to: targetLang,
     });
 
-    // Twilio sandbox-compatible reply
     res.set("Content-Type", "text/xml");
     return res.send(`
       <Response>
         <Message>
-🎤 Heard: ${transcript}
+🎤 Heard (${lang}): ${transcript}
 
-🌎 Translated: ${translated}
+🌎 Translated (${targetLang}): ${translated}
         </Message>
       </Response>
     `);
@@ -160,6 +153,5 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ─── Health Check
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
 app.listen(PORT, () => console.log(`🚀 Server listening on ${PORT}`));
