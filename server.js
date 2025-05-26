@@ -116,23 +116,32 @@ app.post("/webhook", async (req, res) => {
     const step = user.language_step;
 
     // ---- handle onboarding choices ----
+    // ---------- SOURCE LANGUAGE STEP ----------------------------
     if (step === "source" && bodyText) {
-      const m = matchChoice(bodyText);
-      if (m) {
-        const [, src] = m;
+      const srcMatch = matchChoice(bodyText);
+      if (srcMatch) {
+        const [, src] = srcMatch;
         await supabase.from("users").update({ source_lang: src.code, language_step: "target" }).eq("phone_number", from);
-        let prompt = `✅ Got it! What language should I translate messages into?\n\n`;
-        for (const [k, v] of Object.entries(LANGUAGE_OPTIONS)) prompt += `${k}️⃣ ${v.name} (${v.code})\n`;
+
+        let prompt = `✅ Got it! What language should I translate messages into?
+
+`;
+        for (const [k, v] of Object.entries(LANGUAGE_OPTIONS)) prompt += `${k}️⃣ ${v.name} (${v.code})
+`;
         return res.send(`<Response><Message>${prompt}</Message></Response>`);
       }
     }
 
+    // ---------- TARGET LANGUAGE STEP ----------------------------
     if (step === "target" && bodyText) {
-      const m = matchChoice(bodyText);
-      if (m) {
-        const [, tgt] = m;
+      const tgtMatch = matchChoice(bodyText);
+      if (tgtMatch) {
+        const [, tgt] = tgtMatch;
         await supabase.from("users").update({ target_lang: tgt.code, language_step: "done" }).eq("phone_number", from);
-        return res.send(`<Response><Message>✅ You're all set! Send voice or text to translate.</Message></Response>`);
+
+        return res.send(`<Response><Message>✅ You're all set! Send a voice note or text to translate.</Message></Response>`);
+      }
+    }
       }
     }
 
