@@ -5,6 +5,7 @@ import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -13,16 +14,18 @@ const {
   SUPABASE_KEY,
   OPENAI_API_KEY,
   GOOGLE_TRANSLATE_KEY,
+  GOOGLE_TTS_KEY,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER,
   FREE_CREDITS_PER_USER = 30,
   PORT = 8080
 } = process.env;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Convert any audio input to WAV (mono, 16kHz)
 function convertAudio(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
@@ -51,6 +54,41 @@ async function translateText(text, targetLang = "en") {
   });
   const data = await res.json();
   return data.data.translations[0].translatedText;
+}
+
+async function generateSpeech(text, langCode = "es") {
+  const response = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: { text },
+        voice: { languageCode: langCode, ssmlGender: "FEMALE" },
+        audioConfig: { audioEncoding: "MP3" }
+      })
+    }
+  );
+
+  const data = await response.json();
+  if (!data.audioContent) throw new Error("TTS failed");
+  const filePath = `/tmp/tts_${Date.now()}.mp3`;
+  fs.writeFileSync(filePath, Buffer.from(data.audioContent, "base64"));
+  return filePath;
+}
+
+async function uploadToSupabase(filePath, filename) {
+  const fileData = fs.readFileSync(filePath);
+  const { error } = await supabase.storage
+    .from("tts-voices")
+    .upload(filename, fileData, {
+      contentType: "audio/mpeg",
+      upsert: true
+    });
+
+  if (error) throw error;
+
+  return `${SUPABASE_URL}/storage/v1/object/public/tts-voices/${filename}`;
 }
 
 async function decrementCredit(phone) {
@@ -89,10 +127,8 @@ app.post("/webhook", async (req, res) => {
   const mediaUrl = req.body.MediaUrl0;
   const mediaType = req.body.MediaContentType0;
 
-  // Log what’s coming in
   console.log(`Incoming from ${from} — MediaType: ${mediaType}`);
 
-  // Gracefully handle unsupported messages
   if (!mediaUrl || !mediaType || !mediaType.startsWith("audio")) {
     res.set("Content-Type", "text/xml");
     return res.send(`
@@ -125,32 +161,62 @@ app.post("/webhook", async (req, res) => {
     });
 
     if (!audioRes.ok) throw new Error("Failed to fetch media: " + audioRes.status);
-
     fs.writeFileSync(inputPath, await audioRes.buffer());
 
     await convertAudio(inputPath, outputPath);
-    const { text: transcript, lang } = await transcribeAudio(outputPath);
+    const { text: transcript, lang: sourceLang } = await transcribeAudio(outputPath);
 
-    let targetLang = "en";
-    if (lang === "en") targetLang = "es";
+    const { data: userData } = await supabase
+      .from("users")
+      .select("preferred_lang, last_target_lang")
+      .eq("phone_number", from)
+      .single();
+
+    const preferredLang = userData?.preferred_lang || "en";
+    const lastTargetLang = userData?.last_target_lang;
+    const isReply = lastTargetLang && sourceLang === preferredLang;
+    const targetLang = isReply ? lastTargetLang : preferredLang;
 
     const translated = await translateText(transcript, targetLang);
+
+    if (!isReply) {
+      await supabase
+        .from("users")
+        .update({ last_target_lang: sourceLang })
+        .eq("phone_number", from);
+    }
 
     await supabase.from("translations").insert({
       phone_number: from,
       original_text: transcript,
       translated_text: translated,
-      language_from: lang,
+      language_from: sourceLang,
       language_to: targetLang
     });
+
+    if (isReply) {
+      const ttsPath = await generateSpeech(translated, targetLang);
+      const filename = `tts_${Date.now()}.mp3`;
+      const publicUrl = await uploadToSupabase(ttsPath, filename);
+
+      await twilioClient.messages.create({
+        from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
+        to: from,
+        mediaUrl: [publicUrl]
+      });
+
+      return res.sendStatus(200);
+    }
 
     res.set("Content-Type", "text/xml");
     return res.send(`
       <Response>
         <Message>
-🎤 Heard (${lang}): ${transcript}
+🎤 Heard (${sourceLang}): ${transcript}
 
 🌎 Translated (${targetLang}): ${translated}
+
+🔁 Reply with a voice note and I’ll translate it back into ${sourceLang.toUpperCase()}.
         </Message>
       </Response>
     `);
