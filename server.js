@@ -192,3 +192,11 @@ app.post("/webhook", async (req, res) => {
     return res.send(`<Response><Message>⚠️ Please send a voice note or text message.</Message></Response>`);
   } catch (err) {
     console.error("Webhook error", err);
+    res.set("Content-Type", "text/xml");
+    return res.send(`<Response><Message>⚠️ Error processing message. Try again later.</Message></Response>`);
+  }
+});
+
+// health check
+app.get("/healthz", (_, res) => res.status(200).send("OK"));
+app.listen(PORT, () => console.log(`🚀 Server listening on ${PORT}`));
