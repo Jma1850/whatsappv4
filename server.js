@@ -1,4 +1,4 @@
-// server.js – Auto-flip Translator (Whisper large • GPT polish • Safe Neural TTS)
+// server.js – Auto-flip Translator (final voice + unknown-flip fix)
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -25,16 +25,16 @@ const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
 /* ─── Languages menu ─── */
 const LANGS = {
   1: { name: "English",    code: "en", voice: "en-US-Wavenet-D"  },
-  2: { name: "Spanish",    code: "es", voice: "es-ES-Neural2-A"  }, // updated
+  2: { name: "Spanish",    code: "es", voice: "es-ES-Neural2-A"  }, // fixed
   3: { name: "French",     code: "fr", voice: "fr-FR-Wavenet-B"  },
   4: { name: "Portuguese", code: "pt", voice: "pt-BR-Wavenet-A"  }
 };
 const DIGITS = Object.keys(LANGS);
-const matchChoice = t => {
-  const c = t.trim().toLowerCase();
-  const d = c.match(/^\d/)?.[0];
-  if (d && LANGS[d]) return LANGS[d];
-  return Object.values(LANGS).find(v => c === v.code || c === v.name.toLowerCase());
+const matchChoice = txt=>{
+  const c=txt.trim().toLowerCase();
+  const d=c.match(/^\d/)?.[0];
+  if(d&&LANGS[d]) return LANGS[d];
+  return Object.values(LANGS).find(v=>c===v.code||c===v.name.toLowerCase());
 };
 
 /* ─── Audio / AI helpers ─── */
@@ -55,24 +55,21 @@ const translate  = async(t,d)=> (await fetch(`https://translation.googleapis.com
 const polish = async(t,n)=> t.split(/\s+/).length<3? t: (await openai.chat.completions.create({model:"gpt-4o-mini",messages:[{role:"system",content:`You are an expert native ${n} copy-editor. Improve wording without changing meaning.`},{role:"user",content:t}],max_tokens:400})).choices[0].message.content.trim();
 
 async function tts(text, voice){
-  const languageCode = voice.split("-").slice(0,2).join("-"); // "es-ES"
+  const languageCode = voice.split("-").slice(0,2).join("-");
   const ssml = `<speak><prosody rate="90%">${text}</prosody></speak>`;
-
-  // Try with the specified voice
+  // try specified voice
   let j = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,{
-      method:"POST",headers:{ "Content-Type":"application/json"},
-      body:JSON.stringify({input:{ssml},voice:{languageCode,name:voice},audioConfig:{audioEncoding:"MP3"}})
+        method:"POST",headers:{ "Content-Type":"application/json"},
+        body:JSON.stringify({input:{ssml},voice:{languageCode,name:voice},audioConfig:{audioEncoding:"MP3"}})
   }).then(r=>r.json());
-
-  // Fallback to default voice if invalid
+  // fallback to default voice
   if(!j.audioContent){
     j = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,{
-        method:"POST",headers:{ "Content-Type":"application/json"},
-        body:JSON.stringify({input:{ssml},voice:{languageCode},audioConfig:{audioEncoding:"MP3"}})
+          method:"POST",headers:{ "Content-Type":"application/json"},
+          body:JSON.stringify({input:{ssml},voice:{languageCode},audioConfig:{audioEncoding:"MP3"}})
     }).then(r=>r.json());
     if(!j.audioContent) throw new Error("TTS error:"+JSON.stringify(j));
   }
-
   const path=`/tmp/tts_${Date.now()}.mp3`;
   fs.writeFileSync(path,Buffer.from(j.audioContent,"base64"));
   return path;
@@ -92,21 +89,22 @@ app.post("/webhook",async(req,res)=>{
     let {data:u}=await supabase.from("users").select("source_lang,target_lang,language_step").eq("phone_number",from).single();
     if(!u){await supabase.from("users").insert({phone_number:from,language_step:"source"});u={language_step:"source"};}
 
-    /* reset */
+    /* reset command */
     if(/^(change )?language$/i.test(body)){
       await supabase.from("users").update({language_step:"source",source_lang:null,target_lang:null}).eq("phone_number",from);
       let p="🔄 Language setup reset!\nWhat language are the messages you're receiving in?\n\n";for(const k of DIGITS)p+=`${k}️⃣ ${LANGS[k].name} (${LANGS[k].code})\n`;
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
 
-    /* source choice */
+    /* choose source */
     if(u.language_step==="source"){
       const c=matchChoice(body);
       if(c){await supabase.from("users").update({source_lang:c.code,language_step:"target"}).eq("phone_number",from);let p="✅ Got it! What language should I translate messages into?\n\n";for(const k of DIGITS)p+=`${k}️⃣ ${LANGS[k].name} (${LANGS[k].code})\n`;return res.send(`<Response><Message>${p}</Message></Response>`);}
       let p="👋 Welcome! What language are the messages you're receiving in?\n\n";for(const k of DIGITS)p+=`${k}️⃣ ${LANGS[k].name} (${LANGS[k].code})\n`;
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
-    /* target choice */
+
+    /* choose target */
     if(u.language_step==="target"){
       const c=matchChoice(body);
       if(c){await supabase.from("users").update({target_lang:c.code,language_step:"done"}).eq("phone_number",from);return res.send(`<Response><Message>✅ You're all set! Send a voice note or text to translate.</Message></Response>`);}
@@ -114,11 +112,10 @@ app.post("/webhook",async(req,res)=>{
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
 
-    /* translation */
+    /* translation phase */
     const src=u.source_lang,tgt=u.target_lang;
     const tgtVoice=Object.values(LANGS).find(l=>l.code===tgt)?.voice||"en-US-Wavenet-D";
     let orig,det;
-
     if(mUrl&&mTyp?.startsWith("audio")){
       const auth="Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
       const raw=`/tmp/raw_${Date.now()}`,wav=`/tmp/wav_${Date.now()}.wav`;
@@ -129,9 +126,9 @@ app.post("/webhook",async(req,res)=>{
     if(body&&!mUrl){orig=body;det=(await detectLang(orig)).slice(0,2);}
     if(!orig)return res.send(`<Response><Message>⚠️ Please send a voice note or text message.</Message></Response>`);
 
-    /* flip direction – unknown → translate to source */
+    /* flip direction */
     let dest=tgt;
-    if(!det)          dest=src;
+    if(!det)          dest=tgt;     // unknown → translate to target
     else if(det===tgt)dest=src;
     else if(det===src)dest=tgt;
     else              dest=src;
@@ -143,16 +140,15 @@ app.post("/webhook",async(req,res)=>{
     let voiceUrl=null;
     try{voiceUrl=await upload(await tts(tl,langObj.voice),`tts_${Date.now()}.mp3`);}catch(e){console.error(e.message);}
     res.set("Content-Type","text/xml");
-    return res.send(`<Response><Message>
+    res.send(`<Response><Message>
 🗣 Heard (${det||"unknown"}): ${orig}
 
 🌎 Translated (${dest}): ${tl}
 ${voiceUrl?`<Media>${voiceUrl}</Media>`:""}
 </Message></Response>`);
-
   }catch(err){
     console.error("Webhook error:",err);
-    return res.send(`<Response><Message>⚠️ Error processing message. Try again later.</Message></Response>`);
+    res.send(`<Response><Message>⚠️ Error processing message. Try again later.</Message></Response>`);
   }
 });
 
