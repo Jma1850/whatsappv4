@@ -1,4 +1,4 @@
-// server.js – Auto-flip Translator (Whisper-large + GPT polish + Neural TTS)
+// server.js – Auto-flip Translator (Whisper-large • GPT polish • Safe Neural TTS)
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -22,16 +22,16 @@ const {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-/* ────── Language menu ────── */
+/* ────── Languages offered in the menu ────── */
 const LANGS = {
-  1: { name: "English",    code: "en", voice: "en-US-Wavenet-D" },
-  2: { name: "Spanish",    code: "es", voice: "es-ES-Wavenet-A" },
-  3: { name: "French",     code: "fr", voice: "fr-FR-Wavenet-B" },
-  4: { name: "Portuguese", code: "pt", voice: "pt-BR-Wavenet-A" }
+  1: { name: "English",    code: "en", voice: "en-US-Wavenet-D"  },
+  2: { name: "Spanish",    code: "es", voice: "es-ES-Wavenet-A"  },
+  3: { name: "French",     code: "fr", voice: "fr-FR-Wavenet-B"  },
+  4: { name: "Portuguese", code: "pt", voice: "pt-BR-Wavenet-A"  }
 };
 const DIGITS = Object.keys(LANGS);
 
-/* ────── Helpers ────── */
+/* ────── Helper: map input -> language choice ────── */
 const matchChoice = txt => {
   const c = txt.trim().toLowerCase();
   const d = c.match(/^\d/)?.[0];
@@ -39,6 +39,7 @@ const matchChoice = txt => {
   return Object.values(LANGS).find(v => c === v.code || c === v.name.toLowerCase());
 };
 
+/* ────── Audio helpers ────── */
 function convertAudio(input, output) {
   return new Promise((res, rej) => {
     ffmpeg(input).audioCodec("pcm_s16le")
@@ -47,21 +48,21 @@ function convertAudio(input, output) {
   });
 }
 
-/* Whisper with graceful fallback */
+/* Whisper: try large-v3 then fallback to whisper-1 */
 async function transcribe(wav) {
   try {
     const r = await openai.audio.transcriptions.create({
-      model: "whisper-large-v3",
-      file : fs.createReadStream(wav),
+      model:"whisper-large-v3",
+      file :fs.createReadStream(wav),
       response_format:"json"
     });
     console.log("Whisper: large-v3");
     return { text:r.text, lang:r.language||null };
-  } catch (e) {
-    if (e.code !== "model_not_found") throw e;
+  } catch(e){
+    if(e.code!=="model_not_found") throw e;
     const r = await openai.audio.transcriptions.create({
-      model: "whisper-1",
-      file : fs.createReadStream(wav),
+      model:"whisper-1",
+      file :fs.createReadStream(wav),
       response_format:"json"
     });
     console.log("Whisper: whisper-1 fallback");
@@ -69,26 +70,28 @@ async function transcribe(wav) {
   }
 }
 
-async function detectLang(text) {
+/* Detect language for text messages */
+async function detectLang(text){
   const r = await fetch(
     `https://translation.googleapis.com/language/translate/v2/detect?key=${GOOGLE_TRANSLATE_KEY}`,
     { method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ q:text }) });
-  const data = await r.json();
-  return data.data.detections[0][0].language;
+      body: JSON.stringify({ q:text })});
+  return (await r.json()).data.detections[0][0].language;
 }
 
-async function translate(text, target) {
+/* Google Translate */
+async function translate(text,target){
   const r = await fetch(
     `https://translation.googleapis.com/language/translate/v2?key=${GOOGLE_TRANSLATE_KEY}`,
     { method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ q:text, target }) });
+      body: JSON.stringify({ q:text, target })});
   return (await r.json()).data.translations[0].translatedText;
 }
 
-async function polish(text, langName) {
-  if (text.split(/\s+/).length < 3) return text;
-  const sys = `You are an expert native ${langName} copy-editor. Improve wording without changing meaning.`;
+/* GPT-4o-mini polish */
+async function polish(text, langName){
+  if(text.split(/\s+/).length<3) return text;
+  const sys=`You are an expert native ${langName} copy-editor. Improve wording without changing meaning.`;
   const r = await openai.chat.completions.create({
     model:"gpt-4o-mini",
     messages:[{role:"system",content:sys},{role:"user",content:text}],
@@ -97,68 +100,72 @@ async function polish(text, langName) {
   return r.choices[0].message.content.trim();
 }
 
-async function tts(text, langCode, voice) {
+/* Google TTS – safe version */
+async function tts(text, voice){
+  const languageCode = voice.split("-").slice(0,2).join("-");   // "es-ES"
   const ssml = `<speak><prosody rate="90%">${text}</prosody></speak>`;
   const r = await fetch(
     `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,
     { method:"POST", headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({
         input:{ ssml },
-        voice:{ languageCode:langCode, name:voice },
+        voice:{ languageCode, name:voice },
         audioConfig:{ audioEncoding:"MP3" }
       }) });
-  const { audioContent } = await r.json();
-  const path = `/tmp/tts_${Date.now()}.mp3`;
-  fs.writeFileSync(path, Buffer.from(audioContent,"base64"));
+  const j = await r.json();
+  if(!j.audioContent) throw new Error("TTS error: "+JSON.stringify(j));
+  const path=`/tmp/tts_${Date.now()}.mp3`;
+  fs.writeFileSync(path, Buffer.from(j.audioContent,"base64"));
   return path;
 }
 
-async function upload(path, filename) {
-  const data = fs.readFileSync(path);
+/* Upload to Supabase public bucket */
+async function upload(path, filename){
   const { error } = await supabase.storage.from("tts-voices")
-    .upload(filename, data, { contentType:"audio/mpeg", upsert:true });
-  if (error) throw error;
+      .upload(filename, fs.readFileSync(path),
+              { contentType:"audio/mpeg", upsert:true });
+  if(error) throw error;
   return `${SUPABASE_URL}/storage/v1/object/public/tts-voices/${filename}`;
 }
 
-/* ────── Express ────── */
-const app = express();
+/* ────── Express webhook ────── */
+const app=express();
 app.use(bodyParser.urlencoded({extended:false}));
 app.use(bodyParser.json());
 
 app.post("/webhook", async (req,res)=>{
-  const from  = req.body.From;
-  const text  = (req.body.Body||"").trim();
-  const mUrl  = req.body.MediaUrl0;
-  const mTyp  = req.body.MediaContentType0;
+  const from=req.body.From;
+  const text=(req.body.Body||"").trim();
+  const mUrl=req.body.MediaUrl0;
+  const mType=req.body.MediaContentType0;
 
-  try {
-    /* fetch or create user */
+  try{
+    /* fetch/create user row */
     let { data:u } = await supabase.from("users")
       .select("source_lang,target_lang,language_step")
       .eq("phone_number",from).single();
 
     if(!u){
       await supabase.from("users").insert({ phone_number:from, language_step:"source" });
-      u = { language_step:"source" };
+      u={ language_step:"source" };
     }
 
-    /* reset command */
+    /* Reset command */
     if(/^(change )?language$/i.test(text)){
       await supabase.from("users")
-       .update({language_step:"source",source_lang:null,target_lang:null})
-       .eq("phone_number",from);
+        .update({ language_step:"source", source_lang:null, target_lang:null })
+        .eq("phone_number",from);
       let p="🔄 Language setup reset!\nWhat language are the messages you're receiving in?\n\n";
       for(const k of DIGITS) p+=`${k}️⃣ ${LANGS[k].name} (${LANGS[k].code})\n`;
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
 
-    /* source selection */
+    /* ---- Step 1: choose source ---- */
     if(u.language_step==="source"){
       const choice=matchChoice(text);
       if(choice){
         await supabase.from("users")
-          .update({source_lang:choice.code,language_step:"target"})
+          .update({ source_lang:choice.code, language_step:"target" })
           .eq("phone_number",from);
         let p="✅ Got it! What language should I translate messages into?\n\n";
         for(const k of DIGITS) p+=`${k}️⃣ ${LANGS[k].name} (${LANGS[k].code})\n`;
@@ -169,12 +176,12 @@ app.post("/webhook", async (req,res)=>{
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
 
-    /* target selection */
+    /* ---- Step 2: choose target ---- */
     if(u.language_step==="target"){
       const choice=matchChoice(text);
       if(choice){
         await supabase.from("users")
-          .update({target_lang:choice.code,language_step:"done"})
+          .update({ target_lang:choice.code, language_step:"done" })
           .eq("phone_number",from);
         return res.send(`<Response><Message>✅ You're all set! Send a voice note or text to translate.</Message></Response>`);
       }
@@ -183,53 +190,63 @@ app.post("/webhook", async (req,res)=>{
       return res.send(`<Response><Message>${p}</Message></Response>`);
     }
 
-    /* translation */
-    const {source_lang:src, target_lang:tgt}=u;
+    /* ---- Translation phase ---- */
+    const src=u.source_lang, tgt=u.target_lang;
     const tgtVoice = Object.values(LANGS).find(l=>l.code===tgt)?.voice || "en-US-Wavenet-D";
-    let detected; let orig;
+    let orig, detected;
 
     /* VOICE */
-    if(mUrl && mTyp?.startsWith("audio")){
+    if(mUrl && mType?.startsWith("audio")){
       const auth="Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-      const raw=`/tmp/raw_${Date.now()}`; const wav=`/tmp/wav_${Date.now()}.wav`;
+      const raw=`/tmp/raw_${Date.now()}`, wav=`/tmp/wav_${Date.now()}.wav`;
       fs.writeFileSync(raw, await (await fetch(mUrl,{headers:{Authorization:auth}})).buffer());
       await convertAudio(raw,wav);
-      const r = await transcribe(wav); orig=r.text; detected=r.lang;
+      const r=await transcribe(wav); orig=r.text; detected=(r.lang||"").slice(0,2);
     }
 
     /* TEXT */
     if(text && !mUrl){
-      orig=text; detected=await detectLang(orig);
+      orig=text; detected=(await detectLang(orig)).slice(0,2);
     }
 
     if(!orig){
       return res.send(`<Response><Message>⚠️ Please send a voice note or text message.</Message></Response>`);
     }
 
-    /* decide translation direction */
-    let dest = tgt;                       // default
-    if(detected===tgt)  dest=src;
+    /* decide direction */
+    let dest=tgt;
+    if(detected===tgt) dest=src;
     else if(detected===src) dest=tgt;
+    else if(detected) dest=src;   // default: show user’s source language
 
-    const langName = Object.values(LANGS).find(l=>l.code===dest)?.name || dest;
-    const voiceName= Object.values(LANGS).find(l=>l.code===dest)?.voice||tgtVoice;
+    const langObj = Object.values(LANGS).find(l=>l.code===dest) || { name:dest, voice:tgtVoice };
 
-    const tl0 = await translate(orig, dest);
-    const tl  = await polish(tl0, langName);
-    const url = await upload(await tts(tl, dest, voiceName),`tts_${Date.now()}.mp3`);
+    /* translate + polish */
+    const tl0=await translate(orig,dest);
+    const tl =await polish(tl0,langObj.name);
 
-    /* TwiML reply */
+    /* TTS with safe fallback */
+    let voiceUrl=null;
+    try{
+      const mp3=await tts(tl, langObj.voice);
+      voiceUrl=await upload(mp3, `tts_${Date.now()}.mp3`);
+    }catch(e){
+      console.error(e.message);   // logs TTS error but continues
+    }
+
+    /* TwiML response */
+    res.set("Content-Type","text/xml");
     return res.send(`
       <Response>
         <Message>
-🗣 Heard (${detected || "unknown"}): ${orig}
+🗣 Heard (${detected||"unknown"}): ${orig}
 
 🌎 Translated (${dest}): ${tl}
-          <Media>${url}</Media>
+          ${voiceUrl ? `<Media>${voiceUrl}</Media>` : ""}
         </Message>
       </Response>`);
 
-  } catch(err){
+  }catch(err){
     console.error("Webhook error:",err);
     return res.send(`<Response><Message>⚠️ Error processing message. Try again later.</Message></Response>`);
   }
