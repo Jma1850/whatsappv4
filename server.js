@@ -11,6 +11,7 @@ import { randomUUID as uuid } from "crypto";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import * as dotenv from "dotenv";
+import twilio from "twilio";
 dotenv.config();
 
 /* env */
@@ -18,7 +19,8 @@ const {
   SUPABASE_URL, SUPABASE_KEY,
   OPENAI_API_KEY, GOOGLE_TTS_KEY,
   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
-  PORT = 8080
+  PORT = 8080,
+  WHISPER_MODEL, TRANSLATE_MODEL
 } = process.env;
 
 /* db + openai */
@@ -29,6 +31,19 @@ const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
 const app = express();
 app.use(bodyParser.urlencoded({ extended:false }));
 app.use(bodyParser.json());
+
+/* Twilio request validation middleware */
+// TWILIO_AUTH_TOKEN is available here from the destructuring assignment in the "env" section
+const validateTwilioRequest = (req, res, next) => {
+  const isValid = twilio.validateExpressRequest(req, TWILIO_AUTH_TOKEN, {
+    url: `${req.protocol}://${req.get('host')}${req.originalUrl}`
+  });
+
+  if (isValid) {
+    next();
+  }
+  // If !isValid, twilio.validateExpressRequest will have already sent a 403 response.
+};
 
 /* languages (pilot 5) */
 const MENU={
@@ -46,13 +61,20 @@ const toWav=(inF,outF)=>new Promise((res,rej)=>
 
 /* whisper */
 async function whisper(wavPath){
+  const primaryModel = WHISPER_MODEL || "whisper-large-v3";
+  let r;
   try{
-    const r=await openai.audio.transcriptions.create({model:"whisper-large-v3",file:fs.createReadStream(wavPath),response_format:"json"});
-    return{txt:r.text,lang:(r.language||"").slice(0,2)}
-  }catch{
-    const r=await openai.audio.transcriptions.create({model:"whisper-1",file:fs.createReadStream(wavPath),response_format:"json"});
-    return{txt:r.text,lang:(r.language||"").slice(0,2)}
+    r = await openai.audio.transcriptions.create({model: primaryModel, file:fs.createReadStream(wavPath), response_format:"json"});
+  } catch (error) {
+    console.warn(`Whisper primary model ${primaryModel} failed:`, error.message);
+    if (primaryModel !== "whisper-1") {
+      console.log("Attempting fallback to whisper-1");
+      r = await openai.audio.transcriptions.create({model:"whisper-1", file:fs.createReadStream(wavPath), response_format:"json"});
+    } else {
+      throw error; // Re-throw if primary was already whisper-1 or if no fallback defined
+    }
   }
+  return {txt:r.text, lang:(r.language||"").slice(0,2)};
 }
 
 /* detect */
@@ -60,7 +82,8 @@ const detect=async q=>(await fetch(`https://translation.googleapis.com/language/
 
 /* translate */
 async function translate(text,target){
-  const r=await openai.chat.completions.create({model:"gpt-4o-mini",messages:[{role:"system",content:`Translate to ${target}. ONLY translation.`},{role:"user",content:text}],max_tokens:400});
+  const translationModel = TRANSLATE_MODEL || "gpt-4o-mini";
+  const r=await openai.chat.completions.create({model: translationModel, messages:[{role:"system",content:`Translate to ${target}. ONLY translation.`},{role:"user",content:text}],max_tokens:400});
   return r.choices[0].message.content.trim();
 }
 
@@ -92,7 +115,7 @@ async function tts(text,lang){
 const logRow=d=>supabase.from("translations").insert({...d,id:uuid()});
 
 /* webhook */
-app.post("/webhook",async(req,res)=>{
+app.post("/webhook", validateTwilioRequest, async(req,res)=>{
   console.log("📩",{NumMedia:req.body.NumMedia});
   try{
     const phone=req.body.From;
