@@ -1,6 +1,5 @@
 /* ────────────────────────────────────────────────────────────────────────
-   server.js  –  WhatsApp voice + text translator bot
-   Requires Node 18+ (uses crypto.randomUUID)
+   server.js  –  WhatsApp voice + text translator bot (runtime voices)
 ─────────────────────────────────────────────────────────────────────────*/
 import express  from "express";
 import bodyParser from "body-parser";
@@ -15,50 +14,36 @@ dotenv.config();
 
 /* ── env ── */
 const {
-  SUPABASE_URL,
-  SUPABASE_KEY,
-  OPENAI_API_KEY,
-  GOOGLE_TTS_KEY,
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
+  SUPABASE_URL, SUPABASE_KEY,
+  OPENAI_API_KEY, GOOGLE_TTS_KEY,
+  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
   PORT = 8080
 } = process.env;
 
 /* ── clients ── */
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-/* ── express ── */
-const app = express();
+const app      = express();
 app.use(bodyParser.urlencoded({ extended:false }));
 app.use(bodyParser.json());
 
-/* ── language menu ── */
+/* ── languages (pilot 5) ── */
 const MENU = {
-  1:{ name:"English",    code:"en", voice:"en-US-Neural2-D" },
-  2:{ name:"Spanish",    code:"es", voice:"es-ES-Neural2-A" },
-  3:{ name:"French",     code:"fr", voice:"fr-FR-Neural2-B" },
-  4:{ name:"Portuguese", code:"pt", voice:"pt-BR-Neural2-A" }
+  1:{ name:"English",    code:"en" },
+  2:{ name:"Spanish",    code:"es" },
+  3:{ name:"French",     code:"fr" },
+  4:{ name:"Portuguese", code:"pt" },
+  5:{ name:"German",     code:"de" }
 };
 const DIGITS = Object.keys(MENU);
-const renderMenu = title =>
-  `${title}\n\n` + DIGITS.map(d => `${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n");
-
-const pickLang = txt => {
-  const d = txt.trim().match(/^\d/);
-  if (d && MENU[d[0]]) return MENU[d[0]];
-  const lc = txt.trim().toLowerCase();
-  return Object.values(MENU).find(o => o.code === lc || o.name.toLowerCase() === lc);
-};
-const twiml = (...lines)=>`<Response>${lines.map(l=>`\n<Message>${l}</Message>`).join("")}\n</Response>`;
+const menu = t => `${t}\n\n`+DIGITS.map(d=>`${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n");
+const pick = t => { const m=t.trim(); const d=m.match(/^\d/); if(d&&MENU[d])return MENU[d]; const lc=m.toLowerCase(); return Object.values(MENU).find(o=>o.code===lc||o.name.toLowerCase()===lc); };
+const twiml = (...msg)=>`<Response>${msg.map(m=>`\n<Message>${m}</Message>`).join("")}\n</Response>`;
 
 /* ── ffmpeg helper ── */
-const toWav = (inF,outF)=>new Promise((res,rej)=>
-  ffmpeg(inF).audioCodec("pcm_s16le")
-    .outputOptions(["-ac","1","-ar","16000","-f","wav"])
-    .on("error",rej).on("end",()=>res(outF)).save(outF));
+const toWav = (i,o)=>new Promise((r,j)=>ffmpeg(i).audioCodec("pcm_s16le").outputOptions(["-ac","1","-ar","16000","-f","wav"]).on("error",j).on("end",()=>r(o)).save(o));
 
-/* ── Whisper transcription ── */
+/* ── Whisper ── */
 async function whisper(buf){
   const ogg=`/tmp/${uuid()}.ogg`, wav=ogg.replace(".ogg",".wav");
   fs.writeFileSync(ogg,buf); await toWav(ogg,wav);
@@ -71,7 +56,7 @@ async function whisper(buf){
   }finally{ fs.unlinkSync(ogg); fs.unlinkSync(wav); }
 }
 
-/* ── Google language detect (fallback) ── */
+/* ── Google detect (fallback) ── */
 const detect = async q =>
   (await fetch(`https://translation.googleapis.com/language/translate/v2/detect?key=${GOOGLE_TTS_KEY}`,{
     method:"POST",headers:{ "Content-Type":"application/json"},body:JSON.stringify({ q })
@@ -90,110 +75,118 @@ async function translate(text,target){
   return r.choices[0].message.content.trim();
 }
 
-/* ── Google TTS (honours tts_rate) ── */
-async function tts(text, voice, ratePct = "90%"){
-  const lang = voice.split("-",2)[0];
-  const speakingRate = parseFloat(ratePct)/100;      // 0.9 for "90%"
+/* ── Runtime voice discovery ── */
+let voiceCache=null;
+async function loadVoiceCatalog(){
+  if(voiceCache) return;
+  const url=`https://texttospeech.googleapis.com/v1/voices?key=${GOOGLE_TTS_KEY}`;
+  const { voices } = await fetch(url).then(r=>r.json());
+  voiceCache = voices.reduce((map,v)=>{
+    v.languageCodes.forEach(c=>(map[c] ||= []).push(v)); return map;
+  },{});
+}
+async function pickVoice(lang){
+  await loadVoiceCatalog();
+  const L = voiceCache[lang] || [];
+  return (
+    L.find(v=>v.name.includes("Neural2")) ||
+    L.find(v=>v.name.includes("WaveNet")) ||
+    L.find(v=>v.name.includes("Standard")) ||
+    { name:"en-US-Standard-A" }
+  ).name;
+}
+
+/* ── TTS (Normal / Slow) ── */
+async function tts(text, langCode, rate="90%"){
+  const voiceName = await pickVoice(langCode);
+  const speakingRate = parseFloat(rate)/100;
   const r = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,{
     method:"POST",headers:{ "Content-Type":"application/json"},
     body:JSON.stringify({
       input:{ text },
-      voice:{ languageCode:lang, name:voice },
+      voice:{ languageCode:langCode, name:voiceName },
       audioConfig:{ audioEncoding:"MP3", speakingRate }
     })
   });
   const j=await r.json();
-  if(!j.audioContent) throw Error("TTS fail");
+  if(!j.audioContent) throw Error("TTS fail:"+JSON.stringify(j.error||j));
   return Buffer.from(j.audioContent,"base64");
 }
 
-/* ── Supabase log helper ── */
+/* ── Supabase log ── */
 const logRow = d => supabase.from("translations").insert({ ...d, id: uuid() });
 
 /* ── webhook ── */
-app.post("/webhook", async (req,res)=>{
+app.post("/webhook",async(req,res)=>{
   const phone=req.body.From;
-  const body =(req.body.Body||"").trim();
+  const text =(req.body.Body||"").trim();
   const mUrl=req.body.MediaUrl0, mType=req.body.MediaContentType0;
 
-  /* Reset command */
-  if(/^(reset|change language)$/i.test(body)){
-    await supabase.from("users").upsert({ phone_number:phone, language_step:"source", source_lang:null, target_lang:null, tts_rate:"90%" });
+  /* reset command */
+  if(/^(reset|change language)$/i.test(text)){
+    await supabase.from("users").upsert({phone_number:phone,language_step:"source",source_lang:null,target_lang:null,tts_rate:"90%"});
     return res.send(twiml(renderMenu("🔄 Setup reset!\nPick the language you RECEIVE:")));
   }
 
-  /* Fetch user */
-  let { data:user } = await supabase.from("users").select("*").eq("phone_number",phone).single();
-  if(!user){                                             // first contact
-    await supabase.from("users").insert({ phone_number:phone, language_step:"source", tts_rate:"90%" });
-    user = { language_step:"source" };
+  /* user row */
+  let {data:u}=await supabase.from("users").select("*").eq("phone_number",phone).single();
+  if(!u){ await supabase.from("users").insert({phone_number:phone,language_step:"source",tts_rate:"90%"}); u={language_step:"source"}; }
+
+  /* source step */
+  if(u.language_step==="source"){
+    const c=pick(text);
+    if(c){ await supabase.from("users").update({source_lang:c.code,language_step:"target"}).eq("phone_number",phone); return res.send(twiml(renderMenu("✅ Now pick the language I should SEND:"))); }
+    return res.send(twiml("❌ Reply 1-5.",renderMenu("Languages:")));
   }
 
-  /* Step: pick source lang */
-  if(user.language_step==="source"){
-    const c = pickLang(body);
+  /* target step */
+  if(u.language_step==="target"){
+    const c=pick(text);
     if(c){
-      await supabase.from("users").update({source_lang:c.code,language_step:"target"}).eq("phone_number",phone);
-      return res.send(twiml(renderMenu("✅ Now pick the language I should SEND:")));
-    }
-    return res.send(twiml("❌ Reply 1-4.",renderMenu("Languages:")));
-  }
-
-  /* Step: pick target lang (guard) */
-  if(user.language_step==="target"){
-    const c = pickLang(body);
-    if(c){
-      if(c.code===user.source_lang) return res.send(twiml("⚠️ Target must differ from source. Pick again.",renderMenu("Languages:")));
+      if(c.code===u.source_lang) return res.send(twiml("⚠️ Target must differ from source. Pick again.",renderMenu("Languages:")));
       await supabase.from("users").update({target_lang:c.code,language_step:"voice"}).eq("phone_number",phone);
       return res.send(twiml("🔉 Choose voice speed:\n1️⃣ Normal\n2️⃣ Slow (80%)"));
     }
-    return res.send(twiml("❌ Reply 1-4.",renderMenu("Languages:")));
+    return res.send(twiml("❌ Reply 1-5.",renderMenu("Languages:")));
   }
 
-  /* Step: voice-speed */
-  if(user.language_step==="voice"){
-    let rate="90%"; if(/^2$/.test(body)||/slow/i.test(body)) rate="80%";
+  /* voice-speed step */
+  if(u.language_step==="voice"){
+    const rate = /^2$/.test(text)||/slow/i.test(text) ? "80%" : "90%";
     await supabase.from("users").update({tts_rate:rate,language_step:"ready"}).eq("phone_number",phone);
     return res.send(twiml("✅ Setup complete! Send text or a voice note."));
   }
 
-  /* Ensure ready */
-  if(!user.source_lang||!user.target_lang) return res.send(twiml("⚠️ Setup incomplete. Text *reset* to start over."));
+  /* translation phase */
+  if(!u.source_lang||!u.target_lang) return res.send(twiml("⚠️ Setup incomplete. Text *reset* to start over."));
 
-  /* ── Translation ── */
-  let original="", detected="";
+  /* get original + detected lang */
+  let orig="", det="";
   if(mUrl && mType?.startsWith("audio")){
-    /* authenticated fetch */
-    const auth = "Basic " + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-    const buf = await fetch(mUrl,{ headers:{ Authorization: auth }}).then(r=>r.buffer());
-    ({ text:original, lang:detected } = await whisper(buf));
-    if(!detected) detected = (await detect(original)).slice(0,2);
-  }else if(body){
-    original = body;
-    detected = (await detect(original)).slice(0,2);
+    const auth="Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const buf=await fetch(mUrl,{ headers:{ Authorization:auth }}).then(r=>r.buffer());
+    ({text:orig,lang:det}=await whisper(buf));
+    if(!det) det=(await detect(orig)).slice(0,2);
+  }else if(text){
+    orig=text; det=(await detect(orig)).slice(0,2);
   }
 
-  if(!original) return res.send(twiml("⚠️ Send text or a voice note."));
+  if(!orig) return res.send(twiml("⚠️ Send text or a voice note."));
 
-  const dest = detected === user.target_lang ? user.source_lang : user.target_lang;
-  const translated = await translate(original,dest);
-  await logRow({ phone_number:phone, original_text:original, translated_text:translated, language_from:detected, language_to:dest });
+  const dest = det===u.target_lang ? u.source_lang : u.target_lang;
+  const translated = await translate(orig,dest);
+  await logRow({ phone_number:phone, original_text:orig, translated_text:translated, language_from:det, language_to:dest });
 
   /* TEXT → 1 bubble */
   if(!mUrl) return res.send(twiml(translated));
 
   /* AUDIO → 3 bubbles */
   try{
-    const voice = MENU[DIGITS.find(k=>MENU[k].code===dest)].voice;
-    const audio = (await tts(translated,voice,user.tts_rate)).toString("base64");
-    return res.send(twiml(
-      `🗣 ${original}`,
-      translated,
-      `<Media>data:audio/mpeg;base64,${audio}</Media>`
-    ));
-  }catch(err){
-    console.error("TTS error:",err.message);
-    return res.send(twiml(`🗣 ${original}`, translated));
+    const b64 = (await tts(translated,dest,u.tts_rate)).toString("base64");
+    return res.send(twiml(`🗣 ${orig}`, translated, `<Media>data:audio/mpeg;base64,${b64}</Media>`));
+  }catch(e){
+    console.error("TTS error:",e.message);
+    return res.send(twiml(`🗣 ${orig}`, translated));
   }
 });
 
