@@ -8,6 +8,7 @@
    • TTS with gender filter + fallback
    • Upload MP3 to Supabase for Twilio <Media> URL
    • Reset command, flip logic, logging
+   • ✅ Uses upsert({onConflict:['phone_number']}) so “Change language” truly resets
 ─────────────────────────────────────────────────────────────────────────*/
 import express   from "express";
 import bodyParser from "body-parser";
@@ -52,9 +53,7 @@ const pickLang = txt => {
   const m=txt.trim(), d=m.match(/^\d/);
   if(d && MENU[d[0]]) return MENU[d[0]];
   const lc=m.toLowerCase();
-  return Object.values(MENU).find(
-    o=>o.code===lc||o.name.toLowerCase()===lc
-  );
+  return Object.values(MENU).find(o=>o.code===lc||o.name.toLowerCase()===lc);
 };
 const twiml = (...lines) =>
   `<Response>${lines.map(l=>`\n<Message>${l}</Message>`).join("")}\n</Response>`;
@@ -72,14 +71,14 @@ const toWav = (inF,outF) =>
 
 /* ── WHISPER ── */
 async function whisper(wavPath){
-  try{
+  try {
     const r = await openai.audio.transcriptions.create({
       model:"whisper-large-v3",
       file:fs.createReadStream(wavPath),
       response_format:"json"
     });
     return { txt:r.text, lang:(r.language||"").slice(0,2) };
-  }catch{
+  } catch {
     const r = await openai.audio.transcriptions.create({
       model:"whisper-1",
       file:fs.createReadStream(wavPath),
@@ -102,8 +101,8 @@ async function translate(text,target){
   const r = await openai.chat.completions.create({
     model:"gpt-4o-mini",
     messages:[
-      {role:"system",content:`Translate to ${target}. Return ONLY the translation.`},
-      {role:"user",  content:text}
+      { role:"system", content:`Translate to ${target}. Return ONLY the translation.` },
+      { role:"user",   content:text }
     ],
     max_tokens:400
   });
@@ -126,15 +125,14 @@ async function loadVoices(){
   },{});
 }
 (async()=>{
-  try{ await loadVoices(); console.log("🔊 voice cache ready"); }
+  try { await loadVoices(); console.log("🔊 voice cache ready"); }
   catch(e){ console.error("Voice preload error:",e.message); }
 })();
 
-/* ── PICK VOICE (with gender) ── */
-async function pickVoice(lang, gender){
+/* ── PICK VOICE (with gender-filter) ── */
+async function pickVoice(lang,gender){
   await loadVoices();
-  let list = (voiceCache[lang]||[])
-    .filter(v=> v.ssmlGender === (gender||""));
+  let list = (voiceCache[lang]||[]).filter(v=>v.ssmlGender===gender);
   if(!list.length) list = voiceCache[lang]||[];
   return (
     list.find(v=>v.name.includes("Neural2")) ||
@@ -145,9 +143,9 @@ async function pickVoice(lang, gender){
 }
 
 /* ── TTS + FALLBACK ── */
-async function tts(text, lang, gender){
-  const synth = async voiceName => {
-    const languageCode = voiceName.split("-",2).join("-");
+async function tts(text,lang,gender){
+  const synth = async name => {
+    const languageCode = name.split("-",2).join("-");
     const r = await fetch(
       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,
       {
@@ -155,7 +153,7 @@ async function tts(text, lang, gender){
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           input:{ text },
-          voice:{ languageCode, name:voiceName },
+          voice:{ languageCode, name },
           audioConfig:{ audioEncoding:"MP3", speakingRate:0.9 }
         })
       }
@@ -163,18 +161,12 @@ async function tts(text, lang, gender){
     return r.audioContent ? Buffer.from(r.audioContent,"base64") : null;
   };
 
-  // 1️⃣ gender‐filtered primary
-  let buf = await synth(await pickVoice(lang, gender));
+  let buf = await synth(await pickVoice(lang,gender));
   if(buf) return buf;
-
-  // 2️⃣ default for language
   buf = await synth(lang);
   if(buf) return buf;
-
-  // 3️⃣ ultimate fallback
   buf = await synth("en-US-Standard-A");
   if(buf) return buf;
-
   throw new Error(`TTS failed for ${lang}`);
 }
 
@@ -200,33 +192,39 @@ app.post("/webhook", async (req,res) => {
   console.log("📩 Incoming", { from, numMedia:num, url });
 
   try {
-    // RESET
+    // RESET (upsert on phone_number!)
     if(/^(reset|change language)$/i.test(text)){
-      await supabase.from("users").upsert({
-        phone_number:from,
-        language_step:"source",
-        source_lang:null,
-        target_lang:null,
-        voice_gender:null
-      });
+      await supabase.from("users").upsert(
+        {
+          phone_number:from,
+          language_step:"source",
+          source_lang:null,
+          target_lang:null,
+          voice_gender:null
+        },
+        { onConflict:["phone_number"] }
+      );
       return res.send(
         twiml(menuMsg("🔄 Setup reset!\nPick the language you RECEIVE:"))
       );
     }
 
-    // FETCH or CREATE USER
+    // FETCH or INIT USER (also upsert-on-create to avoid duplicates)
     let { data:u } = await supabase
-      .from("users").select("*").eq("phone_number",from).single();
+      .from("users")
+      .select("*")
+      .eq("phone_number",from)
+      .single();
+
     if(!u){
-      await supabase.from("users").insert({
-        phone_number:from,
-        language_step:"source",
-        voice_gender:null
-      });
+      await supabase.from("users").upsert(
+        { phone_number:from, language_step:"source", voice_gender:null },
+        { onConflict:["phone_number"] }
+      );
       u = { language_step:"source", voice_gender:null };
     }
 
-    // STEP 1: source lang
+    // STEP 1: source language
     if(u.language_step==="source"){
       const c = pickLang(text);
       if(c){
@@ -240,16 +238,13 @@ app.post("/webhook", async (req,res) => {
       return res.send(twiml("❌ Reply 1-5.", menuMsg("Languages:")));
     }
 
-    // STEP 2: target lang
+    // STEP 2: target language
     if(u.language_step==="target"){
       const c = pickLang(text);
       if(c){
         if(c.code===u.source_lang)
           return res.send(
-            twiml(
-              "⚠️ Target must differ. Pick again.",
-              menuMsg("Languages:")
-            )
+            twiml("⚠️ Target must differ. Pick again.", menuMsg("Languages:"))
           );
         await supabase.from("users")
           .update({ target_lang:c.code, language_step:"gender" })
@@ -263,9 +258,9 @@ app.post("/webhook", async (req,res) => {
 
     // STEP 3: voice gender
     if(u.language_step==="gender"){
-      let gender = null;
-      if(/^1$/.test(text) || /male/i.test(text))   gender = "MALE";
-      if(/^2$/.test(text) || /female/i.test(text)) gender = "FEMALE";
+      let gender=null;
+      if(/^1$/.test(text)||/male/i.test(text))   gender="MALE";
+      if(/^2$/.test(text)||/female/i.test(text)) gender="FEMALE";
       if(gender){
         await supabase.from("users")
           .update({ voice_gender:gender, language_step:"ready" })
@@ -284,41 +279,30 @@ app.post("/webhook", async (req,res) => {
     if(!u.source_lang||!u.target_lang||!u.voice_gender)
       return res.send(twiml("⚠️ Setup incomplete. Text *reset* to start over."));
 
-    // ---- TRANSLATION ----
+    // TRANSLATION PHASE
     let original="", detected="";
     if(num>0 && url){
-      // download + to WAV
-      const auth = "Basic "+Buffer.from(
-        `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`
-      ).toString("base64");
-      const resp = await fetch(url, { headers:{ Authorization:auth } });
+      const auth = "Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+      const resp = await fetch(url, { headers:{Authorization:auth} });
       const buf  = await resp.buffer();
-      const ctype = resp.headers.get("content-type")||"";
-      const ext = ctype.includes("ogg")?".ogg"
-                : ctype.includes("mpeg")?".mp3"
-                : ctype.includes("mp4")||ctype.includes("m4a")?".m4a"
-                : ".dat";
-      const raw = `/tmp/${uuid()}${ext}`, wav = raw.replace(ext,".wav");
+      const ctype=resp.headers.get("content-type")||"";
+      const ext  = ctype.includes("ogg")?".ogg":ctype.includes("mpeg")?".mp3":ctype.includes("mp4")||ctype.includes("m4a")?".m4a":".dat";
+      const raw  = `/tmp/${uuid()}${ext}`, wav=raw.replace(ext,".wav");
       fs.writeFileSync(raw,buf);
       await toWav(raw,wav);
       try{
         const r = await whisper(wav);
-        original = r.txt;
-        detected = r.lang || (await detectLang(original)).slice(0,2);
+        original=r.txt; detected=r.lang||(await detectLang(original)).slice(0,2);
       }finally{ fs.unlinkSync(raw); fs.unlinkSync(wav); }
     } else if(text){
-      original = text;
-      detected = (await detectLang(original)).slice(0,2);
+      original=text; detected=(await detectLang(original)).slice(0,2);
     }
 
-    if(!original)
-      return res.send(twiml("⚠️ Send text or a voice note."));
+    if(!original) return res.send(twiml("⚠️ Send text or a voice note."));
 
-    // determine flip
     const dest = detected===u.target_lang ? u.source_lang : u.target_lang;
     const translated = await translate(original,dest);
 
-    // log
     await logRow({
       phone_number:from,
       original_text:original,
@@ -328,8 +312,7 @@ app.post("/webhook", async (req,res) => {
     });
 
     // TEXT reply
-    if(num===0)
-      return res.send(twiml(translated));
+    if(num===0) return res.send(twiml(translated));
 
     // AUDIO reply
     try{
