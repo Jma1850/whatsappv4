@@ -147,7 +147,15 @@ async function pickVoice(lang) {
 
 /* ── TTS with three-step fallback ── */
 async function tts(text, lang) {
-  const call = async name => {
+  const voiceName = await pickVoice(lang);
+  let actualLang = lang;
+
+  // If pickVoice resulted in the ultimate fallback, ensure the language code matches.
+  if (voiceName === "en-US-Standard-A") {
+    actualLang = "en-US";
+  }
+
+  const call = async (nameToUse, langToUse) => {
     const r = await fetch(
       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_KEY}`,
       {
@@ -155,7 +163,7 @@ async function tts(text, lang) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input: { text },
-          voice: { languageCode: lang, name },
+          voice: { languageCode: langToUse, name: nameToUse },
           audioConfig: { audioEncoding: "MP3", speakingRate: 0.9 }
         })
       }
@@ -163,19 +171,10 @@ async function tts(text, lang) {
     return r.audioContent ? Buffer.from(r.audioContent, "base64") : null;
   };
 
-  // 1️⃣ primary voice
-  let buf = await call(await pickVoice(lang));
+  const buf = await call(voiceName, actualLang);
   if (buf) return buf;
 
-  // 2️⃣ default for language
-  buf = await call(lang);
-  if (buf) return buf;
-
-  // 3️⃣ ultimate fallback
-  buf = await call("en-US-Standard-A");
-  if (buf) return buf;
-
-  throw new Error(`TTS failed for ${lang}`);
+  throw new Error(`TTS failed for ${lang} with voice ${voiceName}`);
 }
 
 /* ── Supabase logging ── */
