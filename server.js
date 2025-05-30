@@ -268,8 +268,8 @@ async function checkoutUrl(u,tier){
     mode:tier==="life"?"payment":"subscription",
     customer:await ensureCustomer(u),
     line_items:[{price,quantity:1}],
-    success_url:"https://checkout.stripe.com/success",
-    cancel_url:"https://checkout.stripe.com/cancel",
+    success_url:"https://tucanchat.io/success",
+    cancel_url:"https://tucanchat.io/cancel",
     metadata:{tier}
   });
   return s.url;
