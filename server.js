@@ -186,7 +186,7 @@ async function checkoutUrl(u, tier) {
 
 /* ── MISC ── */
 const paywallMsg =
-`⚠️ You’ve used your 5 free translations.
+`⚠️ You’ve used your 5 free translations. To Continue using TucanChat purchase your unlimited plan.
 
 Reply with:
 1️⃣  Monthly  $4.99
