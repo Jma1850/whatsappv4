@@ -1,27 +1,27 @@
 /* ───────────────────────────────────────────────────────────────────────
    TuCan server.js  —  WhatsApp voice↔text translator bot
-   • 5-language wizard        • Whisper + GPT-4o translate
-   • Google-TTS voices        • Stripe pay-wall (5 free)
-   • Supabase logging         • 3-part voice-note reply
-   • Self-healing Storage bucket (‘tts-voices’) creation
+   • 5-language wizard          • Whisper + GPT-4o translate
+   • Google-TTS voices          • Stripe pay-wall (5 free)
+   • Supabase logging           • Self-healing Storage bucket
+   • 3-part voice-note reply    • Prefers en-US voice for English
 ────────────────────────────────────────────────────────────────────────*/
-import express from "express";
+import express    from "express";
 import bodyParser from "body-parser";
-import fetch from "node-fetch";
-import ffmpeg from "fluent-ffmpeg";
-import fs from "fs";
+import fetch      from "node-fetch";
+import ffmpeg     from "fluent-ffmpeg";
+import fs         from "fs";
 import { randomUUID as uuid } from "crypto";
-import OpenAI from "openai";
-import Stripe from "stripe";
-import twilio from "twilio";
+import OpenAI     from "openai";
+import Stripe     from "stripe";
+import twilio     from "twilio";
 import { createClient } from "@supabase/supabase-js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
-/* ── crash guard ───────────────────────────────────────────────────── */
+/* crash guard */
 process.on("unhandledRejection", r => console.error("🔴 UNHANDLED", r));
 
-/* ── ENV ───────────────────────────────────────────────────────────── */
+/* ENV */
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -37,23 +37,22 @@ const {
   TWILIO_PHONE_NUMBER,
   PORT = 8080
 } = process.env;
-
 const WHATSAPP_FROM =
   TWILIO_PHONE_NUMBER.startsWith("whatsapp:")
     ? TWILIO_PHONE_NUMBER
     : `whatsapp:${TWILIO_PHONE_NUMBER}`;
 
-/* ── CLIENTS ───────────────────────────────────────────────────────── */
-const supabase     = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const openai       = new OpenAI({ apiKey: OPENAI_API_KEY });
-const stripe       = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2023-10-16" });
+/* clients */
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
+const stripe   = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2023-10-16" });
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-/* ── EXPRESS ───────────────────────────────────────────────────────── */
+/* express */
 const app = express();
 
 /* ====================================================================
-   1️⃣  STRIPE WEBHOOK (raw body)
+   1️⃣  STRIPE WEBHOOK  (raw body)
 ==================================================================== */
 app.post(
   "/stripe-webhook",
@@ -109,7 +108,7 @@ app.post(
 );
 
 /* ====================================================================
-   2️⃣  CONSTANTS & HELPERS
+   2️⃣  CONSTANTS / HELPERS
 ==================================================================== */
 const MENU = {
   1:{ name:"English",    code:"en" },
@@ -118,7 +117,7 @@ const MENU = {
   4:{ name:"Portuguese", code:"pt" },
   5:{ name:"German",     code:"de" }
 };
-const DIGITS  = Object.keys(MENU);
+const DIGITS = Object.keys(MENU);
 const menuMsg = t =>
   `${t}\n\n${DIGITS.map(d=>`${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n")}`;
 const pickLang = txt => {
@@ -135,7 +134,7 @@ Reply with:
 2️⃣ Annual   $49.99
 3️⃣ Lifetime $199`;
 
-/* — audio helpers — */
+/* audio helpers */
 const toWav = (i,o)=>new Promise((res,rej)=>
   ffmpeg(i).audioCodec("pcm_s16le")
     .outputOptions(["-ac","1","-ar","16000","-f","wav"])
@@ -165,7 +164,7 @@ const detectLang = async q =>
     {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({q})}
   ).then(r=>r.json())).data.detections[0][0].language;
 async function translate(text,target){
-  const r = await openai.chat.completions.create({
+  const r=await openai.chat.completions.create({
     model:"gpt-4o-mini",
     messages:[
       {role:"system",content:`Translate to ${target}. Return ONLY the translation.`},
@@ -176,7 +175,7 @@ async function translate(text,target){
   return r.choices[0].message.content.trim();
 }
 
-/* — Google TTS voices — */
+/* Google TTS voices */
 let voiceCache=null;
 async function loadVoices(){
   if(voiceCache)return;
@@ -196,6 +195,13 @@ async function pickVoice(lang,gender){
   await loadVoices();
   let list=(voiceCache[lang]||[]).filter(v=>v.ssmlGender===gender);
   if(!list.length) list=voiceCache[lang]||[];
+
+  /* ⭐ Prefer en-US over en-AU, en-GB, etc. */
+  if(lang==="en"){
+    const us=list.filter(v=>v.name.startsWith("en-US"));
+    if(us.length) list=us;
+  }
+
   return (
     list.find(v=>v.name.includes("Neural2"))||
     list.find(v=>v.name.includes("WaveNet"))||
@@ -226,23 +232,22 @@ async function tts(text,lang,gender){
   throw new Error("TTS failed");
 }
 
-/* ── Storage helpers (self-healing bucket) ─────────────────────────── */
+/* Storage bucket (self-healing) */
 async function ensureBucket(){
   const { error } = await supabase.storage.createBucket("tts-voices",{ public:true });
-  /* ignore already-exists (PGRST116) */
   if(error && error.code!=="PGRST116") throw error;
 }
 async function uploadAudio(buffer){
   const fn=`tts_${uuid()}.mp3`;
 
-  let up = await supabase
+  let up=await supabase
     .storage.from("tts-voices")
     .upload(fn,buffer,{contentType:"audio/mpeg",upsert:true});
 
   if(up.error && /Bucket not found/i.test(up.error.message)){
     console.warn("⚠️ Bucket missing → creating …");
     await ensureBucket();
-    up = await supabase
+    up=await supabase
       .storage.from("tts-voices")
       .upload(fn,buffer,{contentType:"audio/mpeg",upsert:true});
   }
@@ -250,7 +255,7 @@ async function uploadAudio(buffer){
   return `${SUPABASE_URL}/storage/v1/object/public/tts-voices/${fn}`;
 }
 
-/* — Stripe checkout link — */
+/* Stripe checkout link */
 async function ensureCustomer(u){
   if(u.stripe_cust_id) return u.stripe_cust_id;
   const c=await stripe.customers.create({description:`TuCan ${u.phone_number}`});
@@ -270,16 +275,16 @@ async function checkoutUrl(u,tier){
   return s.url;
 }
 
-/* — log — */
-const logRow = d => supabase.from("translations").insert({ ...d, id:uuid() });
-
-/* — WhatsApp send — */
-async function sendMessage(to, body="", mediaUrl){
-  const payload={ from:WHATSAPP_FROM, to };
-  if(mediaUrl) payload.mediaUrl=[mediaUrl];
-  else         payload.body=body;
-  await twilioClient.messages.create(payload);
+/* skinny Twilio send */
+async function sendMessage(to,body="",mediaUrl){
+  const p={ from:WHATSAPP_FROM, to };
+  if(mediaUrl) p.mediaUrl=[mediaUrl];
+  else         p.body=body;
+  await twilioClient.messages.create(p);
 }
+
+/* log */
+const logRow=d=>supabase.from("translations").insert({ ...d,id:uuid() });
 
 /* ====================================================================
    3️⃣  Main handler
@@ -287,7 +292,7 @@ async function sendMessage(to, body="", mediaUrl){
 async function handleIncoming(from,text,num,mediaUrl){
   if(!from) return;
 
-  /* fetch/init user */
+  /* user */
   let { data:user } = await supabase
     .from("users")
     .select("*")
@@ -303,7 +308,7 @@ async function handleIncoming(from,text,num,mediaUrl){
   }
   const isFree=!user.plan||user.plan==="FREE";
 
-  /* pay-wall buttons */
+  /* pay-wall button replies */
   if(/^[1-3]$/.test(text)&&isFree&&user.free_used>=5){
     const tier=text==="1"?"monthly":text==="2"?"annual":"life";
     try{
@@ -316,7 +321,7 @@ async function handleIncoming(from,text,num,mediaUrl){
     return;
   }
 
-  /* reset */
+  /* reset command */
   if(/^(reset|change language)$/i.test(text)){
     await supabase.from("users").update({
       language_step:"source",source_lang:null,target_lang:null,voice_gender:null
@@ -326,11 +331,9 @@ async function handleIncoming(from,text,num,mediaUrl){
   }
 
   /* paywall gate */
-  if(isFree&&user.free_used>=5){
-    await sendMessage(from,paywallMsg); return;
-  }
+  if(isFree&&user.free_used>=5){ await sendMessage(from,paywallMsg); return; }
 
-  /* wizard */
+  /* wizard steps */
   if(user.language_step==="source"){
     const c=pickLang(text);
     if(c){
@@ -377,24 +380,21 @@ async function handleIncoming(from,text,num,mediaUrl){
     await sendMessage(from,"⚠️ Setup incomplete. Text *reset* to start over.");return;
   }
 
-  /* transcription / detect */
-  let original="", detected="";
+  /* transcribe / detect */
+  let original="",detected="";
   if(num>0&&mediaUrl){
-    const auth="Basic "+Buffer.from(
-      `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`
-    ).toString("base64");
+    const auth="Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
     const resp=await fetch(mediaUrl,{headers:{Authorization:auth}});
-    const buf =await resp.buffer();
+    const buf=await resp.buffer();
     const ctype=resp.headers.get("content-type")||"";
-    const ext = ctype.includes("ogg")?".ogg":
-                ctype.includes("mpeg")?".mp3":
-                ctype.includes("mp4")||ctype.includes("m4a")?".m4a":".dat";
+    const ext=ctype.includes("ogg")?".ogg":
+              ctype.includes("mpeg")?".mp3":
+              ctype.includes("mp4")||ctype.includes("m4a")?".m4a":".dat";
     const raw=`/tmp/${uuid()}${ext}`,wav=raw.replace(ext,".wav");
     fs.writeFileSync(raw,buf); await toWav(raw,wav);
     try{
       const r=await whisper(wav);
-      original=r.txt;
-      detected=r.lang||(await detectLang(original)).slice(0,2);
+      original=r.txt; detected=r.lang||(await detectLang(original)).slice(0,2);
     }finally{ fs.unlinkSync(raw); fs.unlinkSync(wav); }
   }else if(text){
     original=text;
@@ -405,10 +405,9 @@ async function handleIncoming(from,text,num,mediaUrl){
   const dest       = detected===user.target_lang ? user.source_lang : user.target_lang;
   const translated = await translate(original,dest);
 
-  /* update free usage & log */
+  /* usage + log */
   if(isFree){
-    await supabase
-      .from("users")
+    await supabase.from("users")
       .update({free_used:user.free_used+1})
       .eq("phone_number",from);
   }
@@ -420,27 +419,22 @@ async function handleIncoming(from,text,num,mediaUrl){
     language_to:dest
   });
 
-  /* replies */
-  if(num===0){                 // TEXT → TEXT
-    await sendMessage(from,translated);
-    return;
-  }
+  /* reply flow */
+  if(num===0){ await sendMessage(from,translated); return; }
 
-  /* VOICE NOTE → 3 messages */
-  await sendMessage(from,`🗣 ${original}`);
-  await sendMessage(from,translated);
-
+  await sendMessage(from,`🗣 ${original}`);     // 1
+  await sendMessage(from,translated);          // 2
   try{
     const mp3=await tts(translated,dest,user.voice_gender);
     const pub=await uploadAudio(mp3);
-    await sendMessage(from,"",pub);          // audio-only
+    await sendMessage(from,"",pub);            // 3 (audio only)
   }catch(e){
     console.error("TTS/upload error:",e.message);
   }
 }
 
 /* ====================================================================
-   4️⃣  Twilio entry (ACK immediately)
+   4️⃣  Twilio entry  (ACK immediately)
 ==================================================================== */
 app.post(
   "/webhook",
@@ -460,6 +454,6 @@ app.post(
   }
 );
 
-/* ── health ───────────────────────────────────────────────────────── */
+/* health */
 app.get("/healthz",(_,r)=>r.send("OK"));
 app.listen(PORT,()=>console.log("🚀 running on",PORT));
