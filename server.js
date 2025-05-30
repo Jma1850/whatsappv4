@@ -192,9 +192,16 @@ Reply with:
 const logRow=d=>supabase.from("translations").insert({...d,id:uuid()});
 
 /* ── WEBHOOK (Twilio) ── */
-app.post("/webhook", async (req,res)=>{
-  const {From:from,Body:raw,NumMedia,MediaUrl0:url}=req.body;
-  const text=(raw||"").trim(); const num=parseInt(NumMedia||"0",10);
+app.post("/webhook", async (req, res) => {
+  const { From: from, Body: raw, NumMedia, MediaUrl0: url } = req.body;
+
+  // Ignore empty pings (no WhatsApp sender → nothing to do)
+  if (!from) {
+    return res.sendStatus(200);
+  }
+
+  const text = (raw || "").trim();
+  const num  = parseInt(NumMedia || "0", 10);
 
   /* Fetch or create user */
   let {data:user}=await supabase.from("users").select("*").eq("phone_number",from).single();
