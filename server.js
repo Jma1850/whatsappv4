@@ -37,7 +37,7 @@ const stripe   = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2023-10-16" });
 const app = express();
 
 /* ==================================================================== */
-/* 1️⃣  STRIPE RAW-BODY WEBHOOK  (must be first)                        */
+/* 1️⃣  STRIPE RAW-BODY WEBHOOK  (must come before any other parsers)   */
 /* ==================================================================== */
 app.post("/stripe-webhook",
   bodyParser.raw({ type: "application/json" }),
@@ -61,18 +61,37 @@ app.post("/stripe-webhook",
                 : tier === "annual"  ? "ANNUAL"
                 : "LIFETIME";
 
-      const { error } = await supabase
+      // 1) try update by stripe_cust_id
+      let { data, error } = await supabase
         .from("users")
         .update({
           plan,
           free_used: 0,
-          stripe_cust_id: s.customer,
-          stripe_sub_id:  tier === "life" ? null : s.subscription
+          stripe_sub_id: tier === "life" ? null : s.subscription
         })
-        .eq("stripe_cust_id", s.customer);
+        .eq("stripe_cust_id", s.customer)
+        .select("id");
 
-      if (error) console.error("Supabase update error:", error);
-      else       console.log("✅ Plan upgraded →", plan);
+      if (error || !data.length) {
+        console.warn(
+          "❗ No row matched stripe_cust_id, falling back to metadata.uid:",
+          s.metadata.uid
+        );
+        // 2) fallback to metadata.uid
+        const { error: fbErr } = await supabase
+          .from("users")
+          .update({
+            plan,
+            free_used: 0,
+            stripe_cust_id: s.customer,
+            stripe_sub_id: tier === "life" ? null : s.subscription
+          })
+          .eq("id", s.metadata.uid);
+        if (fbErr) console.error("Fallback update error:", fbErr);
+        else       console.log("✅ Plan upgraded by UID →", s.metadata.uid);
+      } else {
+        console.log("✅ Plan upgraded by stripe_cust_id →", data[0].id);
+      }
     }
 
     if (event.type === "customer.subscription.deleted") {
@@ -82,14 +101,14 @@ app.post("/stripe-webhook",
         .update({ plan: "FREE" })
         .eq("stripe_sub_id", sub.id);
     }
+
     res.json({ received: true });
   });
 
 /* ==================================================================== */
 /* 2️⃣  TWILIO & GENERAL PARSERS                                        */
 /* ==================================================================== */
-app.use(bodyParser.urlencoded({ extended: false }));   // Twilio posts
-/* (no JSON parser needed) */
+app.use(bodyParser.urlencoded({ extended: false }));   // Twilio form posts
 
 /* — Helper constants & functions — */
 const MENU = {
@@ -103,21 +122,27 @@ const DIGITS = Object.keys(MENU);
 const menuMsg = t =>
   `${t}\n\n${DIGITS.map(d => `${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n")}`;
 const pickLang = txt => {
-  const m = txt.trim();
-  const d = m.match(/^\d/);
+  const m = txt.trim(), d = m.match(/^\d/);
   if (d && MENU[d[0]]) return MENU[d[0]];
   const lc = m.toLowerCase();
   return Object.values(MENU).find(o => o.code === lc || o.name.toLowerCase() === lc);
 };
 const twiml = (...l) =>
   `<Response>${l.map(x => `\n<Message>${x}</Message>`).join("")}\n</Response>`;
-const paywallMsg = `⚠️ You’ve used your 5 free translations.\n\nReply with:\n1️⃣  Monthly  $4.99\n2️⃣  Annual   $49.99\n3️⃣  Lifetime $199`;
+const paywallMsg = `⚠️ You’ve used your 5 free translations.
+
+Reply with:
+1️⃣  Monthly  $4.99
+2️⃣  Annual   $49.99
+3️⃣  Lifetime $199`;
 
 const toWav = (i, o) =>
   new Promise((res, rej) =>
     ffmpeg(i).audioCodec("pcm_s16le")
       .outputOptions(["-ac","1","-ar","16000","-f","wav"])
-      .on("error", rej).on("end", () => res(o)).save(o)
+      .on("error", rej)
+      .on("end", () => res(o))
+      .save(o)
   );
 
 async function whisper(wav) {
@@ -323,7 +348,7 @@ app.post("/webhook", async (req,res) => {
     return res.send(twiml("❌ Reply 1 or 2.","1️⃣ Male\n2️⃣ Female"));
   }
 
-  if(!user.source_lang||!user.target_lang||!user.voice_gender) {
+  if (!user.source_lang||!user.target_lang||!user.voice_gender) {
     return res.send(twiml("⚠️ Setup incomplete. Text *reset* to start over."));
   }
 
@@ -340,7 +365,7 @@ app.post("/webhook", async (req,res) => {
     try {
       const r = await whisper(wav);
       original = r.txt;
-      detected = r.lang || (await detectLang(original)).slice(0,2);
+      detected = r.lang||(await detectLang(original)).slice(0,2);
     } finally {
       fs.unlinkSync(raw); fs.unlinkSync(wav);
     }
@@ -370,7 +395,7 @@ app.post("/webhook", async (req,res) => {
   if (num===0) return res.send(twiml(translated));
 
   try {
-    const mp3 = await tts(translated,dest,user.voice_gender);
+    const mp3 = await tts(translated, dest, user.voice_gender);
     const pub = await uploadAudio(mp3);
     return res.send(twiml(`🗣 ${original}`, translated, `<Media>${pub}</Media>`));
   } catch(e) {
