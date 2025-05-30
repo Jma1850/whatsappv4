@@ -14,6 +14,11 @@ import { createClient } from "@supabase/supabase-js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
+/* top of file, right after imports */
+process.on("unhandledRejection", (reason, p) => {
+  console.error("🔴 UNHANDLED REJECTION", reason);
+});
+
 /* ── ENV ── */
 const {
   SUPABASE_URL, SUPABASE_KEY,
