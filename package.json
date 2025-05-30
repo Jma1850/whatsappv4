@@ -7,14 +7,14 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "stripe": "^14.18.0",
-    "express": "^4.19.0",
-    "body-parser": "^1.20.2",
-    "node-fetch": "^3.3.2",
-    "fluent-ffmpeg": "^2.1.2",
     "@supabase/supabase-js": "^2.39.6",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "node-fetch": "^3.3.2",
     "openai": "^4.33.0",
-    "twilio": "^4.7.4",
-    "dotenv": "^16.4.5"
+    "stripe": "^14.25.0",
+    "twilio": "^4.7.4"
   }
 }
