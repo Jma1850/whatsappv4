@@ -144,6 +144,9 @@ async function tts(text,lang,gender){
     ).then(r=>r.json());
     return r.audioContent?Buffer.from(r.audioContent,"base64"):null;
   };
+   +  if (!from) {
++    return res.sendStatus(200);          // ignore pings with no sender
++  }
   let b=await synth(await pickVoice(lang,gender)); if(b) return b;
   b=await synth(lang); if(b) return b;
   b=await synth("en-US-Standard-A"); if(b) return b;
