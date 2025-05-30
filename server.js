@@ -172,13 +172,9 @@ async function checkoutUrl(u, tier) {
     mode: tier === "life" ? "payment" : "subscription",
     customer: await ensureCustomer(u),
     line_items: [{ price, quantity: 1 }],
-    after_completion: {
-      type: "hosted_confirmation",
-      hosted_confirmation: {
-        custom_message: "✅ Payment received! Unlimited translations now active."
-      }
-    },
-    cancel_url: "https://stripe.com",
+    /* fallback success & cancel pages */
+    success_url: "https://checkout.stripe.com/success",
+    cancel_url:  "https://checkout.stripe.com/cancel",
     metadata: { uid: u.id, tier }
   });
   return s.url;
@@ -186,7 +182,7 @@ async function checkoutUrl(u, tier) {
 
 /* ── MISC ── */
 const paywallMsg =
-`⚠️ You’ve used your 5 free translations. To Continue using TucanChat purchase your unlimited plan.
+`⚠️ You’ve used your 5 free translations.
 
 Reply with:
 1️⃣  Monthly  $4.99
@@ -214,8 +210,13 @@ app.post("/webhook", async (req, res) => {
   /* paywall button replies */
   if (/^[1-3]$/.test(text) && isFree && user.free_used >= 5) {
     const tier = text === "1" ? "monthly" : text === "2" ? "annual" : "life";
-    const link = await checkoutUrl(user, tier);
-    return res.send(twiml(`Tap to pay → ${link}`));
+    try {
+      const link = await checkoutUrl(user, tier);
+      return res.send(twiml(`Tap to pay → ${link}`));
+    } catch (e) {
+      console.error("Stripe checkout error:", e.message);
+      return res.send(twiml("⚠️ Payment link error. Try again later."));
+    }
   }
 
   /* reset */
@@ -372,3 +373,4 @@ app.post("/stripe-webhook",
 /* ── HEALTH ── */
 app.get("/healthz", (_, r) => r.send("OK"));
 app.listen(PORT, () => console.log("🚀 running on", PORT));
+
