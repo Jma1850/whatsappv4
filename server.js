@@ -128,7 +128,7 @@ const pickLang = txt => {
 };
 const paywallMsg =
 `⚠️ You’ve used your 5 free translations. For unlimited access, please choose 
-one of the billing options below:
+one of the subscription options below:
 
 1️⃣ Monthly  $4.99
 2️⃣ Annual   $49.99
