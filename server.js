@@ -29,7 +29,7 @@ const {
   PORT = 8080
 } = process.env;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const openai   = new OpenAI({ apiKey: OPENAI_API_KEY });
 const stripe   = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2023-10-16" });
 
