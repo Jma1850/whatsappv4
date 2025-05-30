@@ -1,20 +1,21 @@
 /* ───────────────────────────────────────────────────────────────────────
    TuCan server.js  —  WhatsApp voice↔text translator bot
-   • 5-language wizard   • Whisper & GPT-4o translate
-   • Google-TTS voices   • Stripe pay-wall (5 free)
-   • Supabase logging    • 3-part response for voice-notes
+   • 5-language wizard        • Whisper + GPT-4o translate
+   • Google-TTS voices        • Stripe pay-wall (5 free)
+   • Supabase logging         • 3-part voice-note reply
+   • Self-healing Storage bucket (‘tts-voices’) creation
 ────────────────────────────────────────────────────────────────────────*/
-import express      from "express";
-import bodyParser   from "body-parser";
-import fetch        from "node-fetch";
-import ffmpeg       from "fluent-ffmpeg";
-import fs           from "fs";
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
+import ffmpeg from "fluent-ffmpeg";
+import fs from "fs";
 import { randomUUID as uuid } from "crypto";
-import OpenAI       from "openai";
-import Stripe       from "stripe";
-import twilio       from "twilio";
+import OpenAI from "openai";
+import Stripe from "stripe";
+import twilio from "twilio";
 import { createClient } from "@supabase/supabase-js";
-import * as dotenv  from "dotenv";
+import * as dotenv from "dotenv";
 dotenv.config();
 
 /* ── crash guard ───────────────────────────────────────────────────── */
@@ -33,7 +34,7 @@ const {
   PRICE_LIFE,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_PHONE_NUMBER,          // +1415…  (no “whatsapp:”)
+  TWILIO_PHONE_NUMBER,
   PORT = 8080
 } = process.env;
 
@@ -108,7 +109,7 @@ app.post(
 );
 
 /* ====================================================================
-   2️⃣  CONSTANTS & HELPERS  (wizard, whisper, translate, TTS…)
+   2️⃣  CONSTANTS & HELPERS
 ==================================================================== */
 const MENU = {
   1:{ name:"English",    code:"en" },
@@ -224,12 +225,28 @@ async function tts(text,lang,gender){
   buf=await synth("en-US-Standard-A"); if(buf)return buf;
   throw new Error("TTS failed");
 }
+
+/* ── Storage helpers (self-healing bucket) ─────────────────────────── */
+async function ensureBucket(){
+  const { error } = await supabase.storage.createBucket("tts-voices",{ public:true });
+  /* ignore already-exists (PGRST116) */
+  if(error && error.code!=="PGRST116") throw error;
+}
 async function uploadAudio(buffer){
   const fn=`tts_${uuid()}.mp3`;
-  const {error}=await supabase
+
+  let up = await supabase
     .storage.from("tts-voices")
     .upload(fn,buffer,{contentType:"audio/mpeg",upsert:true});
-  if(error) throw error;
+
+  if(up.error && /Bucket not found/i.test(up.error.message)){
+    console.warn("⚠️ Bucket missing → creating …");
+    await ensureBucket();
+    up = await supabase
+      .storage.from("tts-voices")
+      .upload(fn,buffer,{contentType:"audio/mpeg",upsert:true});
+  }
+  if(up.error) throw up.error;
   return `${SUPABASE_URL}/storage/v1/object/public/tts-voices/${fn}`;
 }
 
@@ -256,8 +273,8 @@ async function checkoutUrl(u,tier){
 /* — log — */
 const logRow = d => supabase.from("translations").insert({ ...d, id:uuid() });
 
-/* — send WhatsApp — */
-async function sendMessage(to, body, mediaUrl){
+/* — WhatsApp send — */
+async function sendMessage(to, body="", mediaUrl){
   const payload={ from:WHATSAPP_FROM, to };
   if(mediaUrl) payload.mediaUrl=[mediaUrl];
   else         payload.body=body;
@@ -265,12 +282,12 @@ async function sendMessage(to, body, mediaUrl){
 }
 
 /* ====================================================================
-   3️⃣  handleIncoming  (wizard + translation + 3-part voice replies)
+   3️⃣  Main handler
 ==================================================================== */
-async function handleIncoming(from, text, num, mediaUrl){
+async function handleIncoming(from,text,num,mediaUrl){
   if(!from) return;
 
-  /* fetch / init user */
+  /* fetch/init user */
   let { data:user } = await supabase
     .from("users")
     .select("*")
@@ -278,17 +295,15 @@ async function handleIncoming(from, text, num, mediaUrl){
     .single();
 
   if(!user){
-    ({ data:user } = await supabase
-      .from("users")
+    ({ data:user } = await supabase.from("users")
       .upsert(
-        { phone_number:from, language_step:"source", plan:"FREE", free_used:0 },
+        { phone_number:from,language_step:"source",plan:"FREE",free_used:0 },
         { onConflict:["phone_number"] }
-      )
-      .select("*").single());
+      ).select("*").single());
   }
   const isFree=!user.plan||user.plan==="FREE";
 
-  /* paywall button */
+  /* pay-wall buttons */
   if(/^[1-3]$/.test(text)&&isFree&&user.free_used>=5){
     const tier=text==="1"?"monthly":text==="2"?"annual":"life";
     try{
@@ -315,7 +330,7 @@ async function handleIncoming(from, text, num, mediaUrl){
     await sendMessage(from,paywallMsg); return;
   }
 
-  /* wizard steps (unchanged) */
+  /* wizard */
   if(user.language_step==="source"){
     const c=pickLang(text);
     if(c){
@@ -332,8 +347,7 @@ async function handleIncoming(from, text, num, mediaUrl){
     const c=pickLang(text);
     if(c){
       if(c.code===user.source_lang){
-        await sendMessage(from,menuMsg("⚠️ Target must differ.\nLanguages:"));
-        return;
+        await sendMessage(from,menuMsg("⚠️ Target must differ.\nLanguages:"));return;
       }
       await supabase.from("users")
         .update({target_lang:c.code,language_step:"gender"})
@@ -360,10 +374,10 @@ async function handleIncoming(from, text, num, mediaUrl){
   }
 
   if(!user.source_lang||!user.target_lang||!user.voice_gender){
-    await sendMessage(from,"⚠️ Setup incomplete. Text *reset* to start over."); return;
+    await sendMessage(from,"⚠️ Setup incomplete. Text *reset* to start over.");return;
   }
 
-  /* transcription / detection */
+  /* transcription / detect */
   let original="", detected="";
   if(num>0&&mediaUrl){
     const auth="Basic "+Buffer.from(
@@ -381,7 +395,7 @@ async function handleIncoming(from, text, num, mediaUrl){
       const r=await whisper(wav);
       original=r.txt;
       detected=r.lang||(await detectLang(original)).slice(0,2);
-    }finally{ fs.unlinkSync(raw); fs.unlinkSync(wav);}
+    }finally{ fs.unlinkSync(raw); fs.unlinkSync(wav); }
   }else if(text){
     original=text;
     detected=(await detectLang(original)).slice(0,2);
@@ -391,9 +405,10 @@ async function handleIncoming(from, text, num, mediaUrl){
   const dest       = detected===user.target_lang ? user.source_lang : user.target_lang;
   const translated = await translate(original,dest);
 
-  /* update free_used & log */
+  /* update free usage & log */
   if(isFree){
-    await supabase.from("users")
+    await supabase
+      .from("users")
       .update({free_used:user.free_used+1})
       .eq("phone_number",from);
   }
@@ -405,28 +420,27 @@ async function handleIncoming(from, text, num, mediaUrl){
     language_to:dest
   });
 
-  /* —--- REPLIES ---- */
-  if(num===0){
-    /* text → text (single message) */
+  /* replies */
+  if(num===0){                 // TEXT → TEXT
     await sendMessage(from,translated);
     return;
   }
 
-  /* voice-note → three-message flow */
-  await sendMessage(from,`🗣 ${original}`);        // 1️⃣ heard
-  await sendMessage(from,translated);             // 2️⃣ translation
+  /* VOICE NOTE → 3 messages */
+  await sendMessage(from,`🗣 ${original}`);
+  await sendMessage(from,translated);
 
   try{
     const mp3=await tts(translated,dest,user.voice_gender);
     const pub=await uploadAudio(mp3);
-    await sendMessage(from,"",pub);               // 3️⃣ audio-only
+    await sendMessage(from,"",pub);          // audio-only
   }catch(e){
     console.error("TTS/upload error:",e.message);
   }
 }
 
 /* ====================================================================
-   4️⃣  Twilio entry (parse-urlencoded, ACK immediately)
+   4️⃣  Twilio entry (ACK immediately)
 ==================================================================== */
 app.post(
   "/webhook",
@@ -448,6 +462,4 @@ app.post(
 
 /* ── health ───────────────────────────────────────────────────────── */
 app.get("/healthz",(_,r)=>r.send("OK"));
-app.listen(PORT,()=>{
-  console.log("🚀 running on",PORT);
-});
+app.listen(PORT,()=>console.log("🚀 running on",PORT));
