@@ -4,6 +4,7 @@
    • Google-TTS voices          • Stripe pay-wall (5 free)
    • Supabase logging           • Self-healing Storage bucket
    • 3-part voice-note reply    • Prefers en-US voice for English
+   • NEW: onboarding messages in user’s language
 ────────────────────────────────────────────────────────────────────────*/
 import express    from "express";
 import bodyParser from "body-parser";
@@ -52,7 +53,7 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const app = express();
 
 /* ====================================================================
-   1️⃣  STRIPE WEBHOOK  (raw body)
+   1️⃣  STRIPE WEBHOOK  (raw body)  –– unchanged
 ==================================================================== */
 app.post(
   "/stripe-webhook",
@@ -118,14 +119,22 @@ const MENU = {
   5:{ name:"German",     code:"de" }
 };
 const DIGITS = Object.keys(MENU);
-const menuMsg = t =>
-  `${t}\n\n${DIGITS.map(d=>`${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n")}`;
+const menuLines = () =>
+  DIGITS.map(d=>`${d}️⃣ ${MENU[d].name} (${MENU[d].code})`).join("\n");
+
+/* first-contact / reset menu */
+const welcomeMenu = () => [
+  "👋 *Welcome to TuCanChat!*  Please choose your language:",
+  menuLines()
+];
+
 const pickLang = txt => {
   const m = txt.trim(), d = m.match(/^\d/);
   if (d && MENU[d[0]]) return MENU[d[0]];
   const lc = m.toLowerCase();
   return Object.values(MENU).find(o=>o.code===lc||o.name.toLowerCase()===lc);
 };
+
 const paywallMsg =
 `⚠️ You’ve used your 5 free translations. For unlimited access, please choose 
 one of the subscription options below:
@@ -134,7 +143,21 @@ one of the subscription options below:
 2️⃣ Annual   $49.99
 3️⃣ Lifetime $199`;
 
-/* audio helpers */
+/* tiny GPT helper – translate arbitrary snippet */
+async function gptTranslate(text,target){
+  if(target==="en") return text;
+  const r = await openai.chat.completions.create({
+    model:"gpt-4o-mini",
+    messages:[
+      { role:"system", content:`Translate to ${target}. Return ONLY the translation.` },
+      { role:"user",   content:text }
+    ],
+    max_tokens:300
+  });
+  return r.choices[0].message.content.trim();
+}
+
+/* ────────── (all audio / TTS helpers remain unchanged) ────────── */
 const toWav = (i,o)=>new Promise((res,rej)=>
   ffmpeg(i).audioCodec("pcm_s16le")
     .outputOptions(["-ac","1","-ar","16000","-f","wav"])
@@ -143,14 +166,14 @@ const toWav = (i,o)=>new Promise((res,rej)=>
 );
 async function whisper(wav){
   try{
-    const r = await openai.audio.transcriptions.create({
+    const r=await openai.audio.transcriptions.create({
       model:"whisper-large-v3",
       file:fs.createReadStream(wav),
       response_format:"json"
     });
     return { txt:r.text, lang:(r.language||"").slice(0,2) };
   }catch{
-    const r = await openai.audio.transcriptions.create({
+    const r=await openai.audio.transcriptions.create({
       model:"whisper-1",
       file:fs.createReadStream(wav),
       response_format:"json"
@@ -196,7 +219,7 @@ async function pickVoice(lang,gender){
   let list=(voiceCache[lang]||[]).filter(v=>v.ssmlGender===gender);
   if(!list.length) list=voiceCache[lang]||[];
 
-  /* ⭐ Prefer en-US over en-AU, en-GB, etc. */
+  /* ⭐ Prefer en-US over en-AU etc */
   if(lang==="en"){
     const us=list.filter(v=>v.name.startsWith("en-US"));
     if(us.length) list=us;
@@ -305,6 +328,10 @@ async function handleIncoming(from,text,num,mediaUrl){
         { phone_number:from,language_step:"source",plan:"FREE",free_used:0 },
         { onConflict:["phone_number"] }
       ).select("*").single());
+
+    /* first-contact welcome */
+    for(const line of welcomeMenu()) await sendMessage(from,line);
+    return;
   }
   const isFree=!user.plan||user.plan==="FREE";
 
@@ -326,56 +353,64 @@ async function handleIncoming(from,text,num,mediaUrl){
     await supabase.from("users").update({
       language_step:"source",source_lang:null,target_lang:null,voice_gender:null
     }).eq("phone_number",from);
-    await sendMessage(from,menuMsg("🔄 Setup reset!\nPick the language you RECEIVE:"));
+    for(const line of welcomeMenu()) await sendMessage(from,line);
     return;
   }
 
   /* paywall gate */
   if(isFree&&user.free_used>=5){ await sendMessage(from,paywallMsg); return; }
 
-  /* wizard steps */
+  /* wizard: source language */
   if(user.language_step==="source"){
     const c=pickLang(text);
-    if(c){
-      await supabase.from("users")
-        .update({source_lang:c.code,language_step:"target"})
-        .eq("phone_number",from);
-      await sendMessage(from,menuMsg("✅ Now pick the language I should SEND:"));
-    }else{
-      await sendMessage(from,menuMsg("❌ Reply 1-5.\nLanguages:"));
-    }
+    if(!c){ await sendMessage(from,"❌ Reply 1-5.\n"+menuLines()); return; }
+
+    await supabase.from("users")
+      .update({source_lang:c.code,language_step:"target"})
+      .eq("phone_number",from);
+
+    /* translated “how it works” blurb */
+    const explEn=`How TuCanChat works:
+• Forward any voice note or type a message.
+• I send back the transcription + translation.
+• You'll also get an audio reply in the other language.
+First 5 translations are free.`;
+    const expl = c.code==="en" ? explEn : await gptTranslate(explEn,c.code);
+
+    await sendMessage(from,expl);
+    await sendMessage(from,"✅ Now pick the language I should SEND:\n"+menuLines());
     return;
   }
+
+  /* wizard: target language */
   if(user.language_step==="target"){
     const c=pickLang(text);
-    if(c){
-      if(c.code===user.source_lang){
-        await sendMessage(from,menuMsg("⚠️ Target must differ.\nLanguages:"));return;
-      }
-      await supabase.from("users")
-        .update({target_lang:c.code,language_step:"gender"})
-        .eq("phone_number",from);
-      await sendMessage(from,"🔊 Voice gender?\n1️⃣ Male\n2️⃣ Female");
-    }else{
-      await sendMessage(from,menuMsg("❌ Reply 1-5.\nLanguages:"));
+    if(!c){ await sendMessage(from,"❌ Reply 1-5.\n"+menuLines()); return; }
+    if(c.code===user.source_lang){
+      await sendMessage(from,"⚠️ Target must differ.\n"+menuLines()); return;
     }
+    await supabase.from("users")
+      .update({target_lang:c.code,language_step:"gender"})
+      .eq("phone_number",from);
+    await sendMessage(from,"🔊 Voice gender?\n1️⃣ Male\n2️⃣ Female");
     return;
   }
+
+  /* wizard: gender */
   if(user.language_step==="gender"){
     let g=null;
     if(/^1$/.test(text)||/male/i.test(text))   g="MALE";
     if(/^2$/.test(text)||/female/i.test(text)) g="FEMALE";
-    if(g){
-      await supabase.from("users")
-        .update({voice_gender:g,language_step:"ready"})
-        .eq("phone_number",from);
-      await sendMessage(from,"✅ Setup complete! Send text or a voice note.");
-    }else{
-      await sendMessage(from,"❌ Reply 1 or 2.\n1️⃣ Male\n2️⃣ Female");
-    }
+    if(!g){ await sendMessage(from,"❌ Reply 1 or 2.\n1️⃣ Male\n2️⃣ Female"); return; }
+
+    await supabase.from("users")
+      .update({voice_gender:g,language_step:"ready"})
+      .eq("phone_number",from);
+    await sendMessage(from,"✅ Setup complete! Send text or a voice note.");
     return;
   }
 
+  /* guard */
   if(!user.source_lang||!user.target_lang||!user.voice_gender){
     await sendMessage(from,"⚠️ Setup incomplete. Text *reset* to start over.");return;
   }
@@ -457,3 +492,4 @@ app.post(
 /* health */
 app.get("/healthz",(_,r)=>r.send("OK"));
 app.listen(PORT,()=>console.log("🚀 running on",PORT));
+
