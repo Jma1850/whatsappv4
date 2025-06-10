@@ -139,9 +139,8 @@ const paywallMsg =
 `⚠️ You’ve used your 5 free translations. For unlimited access, please choose 
 one of the subscription options below:
 
-1️⃣ Monthly  $4.99
-2️⃣ Annual   $49.99
-3️⃣ Lifetime $199`;
+1️⃣ Monthly  $1.99
+2️⃣ Annual   $19.99`;
 
 /* tiny GPT helper – translate arbitrary snippet */
 async function gptTranslate(text,target){
