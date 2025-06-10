@@ -136,7 +136,7 @@ const pickLang = txt => {
 };
 
 const paywallMsg =
-`⚠️ You’ve used your 5 free translations. For unlimited access, please choose 
+`⚠️ You’ve used your 10 free translations. For unlimited access, please choose 
 one of the subscription options below:
 
 1️⃣ Monthly  $1.99
