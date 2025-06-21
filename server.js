@@ -56,7 +56,7 @@ async function ensureCustomer(user) {
     description: `TuCanChat — ${user.phone_number}`,
     email      : user.email || undefined,
     name       : user.full_name || user.phone_number,
-    metadata   : { uid: user.id }           // store Supabase uid in Stripe
+    metadata   : { uuid: user.id }          // ← use uuid here
   });
 
   /* atomic update ⇒ fail loudly if it doesn’t stick */
@@ -88,7 +88,7 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
     line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier, uid: user.id }     // keep uid for webhook fallback
+    metadata   : { tier, uuid: user.id }    // ← and here
   });
 
   return session.url;
@@ -138,12 +138,12 @@ app.post(
         .eq("stripe_cust_id", s.customer)
         .select();
 
-      /* 2️⃣ fall back to uid in metadata (first-time checkout) */
-      if (!data.length && s.metadata?.uid) {
+      /* 2️⃣ fall back to uuid in metadata (first-time checkout) */
+      if (!data.length && s.metadata?.uuid) {
         ({ data, error } = await supabase
           .from("users")
           .update(updateFields)
-          .eq("id", s.metadata.uid)
+          .eq("id", s.metadata.uuid)
           .select());
       }
 
@@ -175,7 +175,6 @@ app.post(
     res.json({ received: true });          // ACK Stripe
   }
 );
-
 
 /* ====================================================================
    2️⃣  CONSTANTS / HELPERS
