@@ -48,18 +48,17 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
    Stripe helpers
 ────────────────────────────────────────────────────────────────────── */
 
-/* Ensure row has stripe_cust_id before checkout */
+/* Ensure the user row has stripe_cust_id *before* Checkout */
 async function ensureCustomer(user) {
   if (user.stripe_cust_id) return user.stripe_cust_id;
 
   const c = await stripe.customers.create({
     description: `TuCanChat — ${user.phone_number}`,
-    email      : user.email || undefined,
-    name       : user.full_name || user.phone_number,
-    metadata   : { uuid: user.id }          // ← use uuid here
+    email      : user.email      || undefined,
+    name       : user.full_name  || user.phone_number,
+    metadata   : { uuid: user.id }        // keep Supabase uuid in Stripe
   });
 
-  /* atomic update ⇒ fail loudly if it doesn’t stick */
   const { error } = await supabase
     .from("users")
     .update({ stripe_cust_id: c.id })
@@ -88,14 +87,14 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
     line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier, uuid: user.id }    // ← and here
+    metadata   : { tier, uuid: user.id }   // uuid for webhook fallback
   });
 
   return session.url;
 }
 
 /* ──────────────────────────────────────────────────────────────────────
-   Stripe webhook  (must be above any JSON body-parser)
+   Stripe webhook (must be above any JSON body-parser)
 ────────────────────────────────────────────────────────────────────── */
 const app = express();
 
@@ -103,7 +102,7 @@ app.post(
   "/stripe-webhook",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
-    /* verify signature */
+    /* 1. verify signature */
     let event;
     try {
       event = stripe.webhooks.constructEvent(
@@ -113,49 +112,65 @@ app.post(
       );
     } catch (err) {
       console.error("⚠️  Stripe signature failed:", err.message);
-      return res.sendStatus(400);          // tell Stripe to retry
+      return res.sendStatus(400);            // ask Stripe to retry
     }
 
-    /* checkout complete → upgrade */
+    /* 2. handle checkout completion */
     if (event.type === "checkout.session.completed") {
       const s = event.data.object;
+
       const plan =
         s.metadata.tier === "monthly" ? "MONTHLY" :
         s.metadata.tier === "annual"  ? "ANNUAL"  :
         "LIFETIME";
 
+      /* values we’ll persist no matter which lookup succeeds */
       const updateFields = {
         plan,
         free_used     : 0,
-        stripe_sub_id : s.subscription ?? null, // null for lifetime
-        stripe_cust_id: s.customer              // ensure it’s stored
+        stripe_sub_id : s.subscription ?? null,   // null for lifetime
+        stripe_cust_id: s.customer                // back-fill for next time
       };
 
-      /* 1️⃣ try match by stripe_cust_id (returning customers) */
-      let { data, error } = await supabase
+      let data, error;
+
+      /* 2-A. returning customers (stripe_cust_id already present) */
+      ({ data = [], error } = await supabase
         .from("users")
         .update(updateFields)
         .eq("stripe_cust_id", s.customer)
-        .select();
+        .select());
 
-      /* 2️⃣ fall back to uuid in metadata (first-time checkout) */
+      /* 2-B. first-time customers created *after* the helper fix */
       if (!data.length && s.metadata?.uuid) {
-        ({ data, error } = await supabase
+        ({ data = [], error } = await supabase
           .from("users")
           .update(updateFields)
           .eq("id", s.metadata.uuid)
           .select());
       }
 
+      /* 2-C. first-time customers created *before* the helper fix   */
+      if (!data.length) {
+        const cust = await stripe.customers.retrieve(s.customer);
+        if (cust?.metadata?.uuid) {
+          ({ data = [], error } = await supabase
+            .from("users")
+            .update(updateFields)
+            .eq("id", cust.metadata.uuid)
+            .select());
+        }
+      }
+
       if (error || !data.length) {
         console.error("❌ Supabase update failed / user not found:", error);
-        return res.sendStatus(500);        // let Stripe retry
+        return res.sendStatus(500);          // let Stripe retry later
       }
 
       console.log("✅ plan set to", plan, "for user", data[0].id);
     }
 
-    /* subscription cancelled → downgrade */
+    /* 3. handle subscription cancellation */
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object;
       const { data, error } = await supabase
@@ -166,15 +181,16 @@ app.post(
 
       if (error || !data.length) {
         console.error("❌ downgrade failed / sub not found:", error);
-        return res.sendStatus(500);        // retry
+        return res.sendStatus(500);          // let Stripe retry
       }
 
       console.log("↩️  subscription cancelled for", sub.id);
     }
 
-    res.json({ received: true });          // ACK Stripe
+    res.json({ received: true });             // ACK Stripe
   }
 );
+
 
 /* ====================================================================
    2️⃣  CONSTANTS / HELPERS
