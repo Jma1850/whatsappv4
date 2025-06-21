@@ -48,7 +48,7 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
    Stripe helpers
 ────────────────────────────────────────────────────────────────────── */
 
-/* Ensure the user row has stripe_cust_id *before* Checkout */
+/* Ensure the user row has stripe_cust_id before we send them to Checkout */
 async function ensureCustomer(user) {
   if (user.stripe_cust_id) return user.stripe_cust_id;
 
@@ -56,7 +56,7 @@ async function ensureCustomer(user) {
     description: `TuCanChat — ${user.phone_number}`,
     email      : user.email      || undefined,
     name       : user.full_name  || user.phone_number,
-    metadata   : { uuid: user.id }          // store Supabase uuid in Stripe
+    metadata   : { uuid: user.id }                 // keep Supabase UUID in Stripe
   });
 
   const { error } = await supabase
@@ -66,14 +66,14 @@ async function ensureCustomer(user) {
     .single();
 
   if (error) {
-    console.error("❌ Failed to persist stripe_cust_id:", error.message);
+    console.error("❌ Failed to store stripe_cust_id:", error.message);
     throw error;
   }
 
   return c.id;
 }
 
-/* Build hosted-checkout link */
+/* Build and return a hosted-checkout URL */
 async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
   const price =
     tier === "monthly" ? PRICE_MONTHLY :
@@ -87,7 +87,7 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
     line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier, uuid: user.id }     // uuid for webhook fallback
+    metadata   : { tier, uuid: user.id }           // uuid for webhook fallback
   });
 
   return session.url;
@@ -112,10 +112,10 @@ app.post(
       );
     } catch (err) {
       console.error("⚠️  Stripe signature failed:", err.message);
-      return res.sendStatus(400);            // ask Stripe to retry
+      return res.sendStatus(400);                // ask Stripe to retry
     }
 
-    /* 2. checkout complete → upgrade */
+    /* ─────────  checkout complete → upgrade  ───────── */
     if (event.type === "checkout.session.completed") {
       const s = event.data.object;
 
@@ -128,19 +128,19 @@ app.post(
         plan,
         free_used     : 0,
         stripe_sub_id : s.subscription ?? null,   // null for lifetime
-        stripe_cust_id: s.customer                // back-fill for next time
+        stripe_cust_id: s.customer                // store for future lookups
       };
 
       let data = [], error;
 
-      /* 2-A. returning customers */
+      /* 2-A. returning customers (row already has stripe_cust_id) */
       ({ data, error } = await supabase
         .from("users")
         .update(updateFields)
         .eq("stripe_cust_id", s.customer)
         .select());
 
-      /* 2-B. first-timers after helper fix (uuid in session metadata) */
+      /* 2-B. first-timers after helper fix (uuid in Session metadata) */
       if (!data.length && s.metadata?.uuid) {
         ({ data, error } = await supabase
           .from("users")
@@ -161,15 +161,29 @@ app.post(
         }
       }
 
+      /* 2-D. absolute last chance – match on phone_number
+              (stored in customer_details.name as "whatsapp:+506…") */
+      if (
+        !data.length &&
+        s.customer_details?.name &&
+        s.customer_details.name.startsWith("whatsapp:+")
+      ) {
+        ({ data, error } = await supabase
+          .from("users")
+          .update(updateFields)
+          .eq("phone_number", s.customer_details.name)
+          .select());
+      }
+
       if (error || !data.length) {
         console.error("❌ Supabase update failed / user not found:", error);
-        return res.sendStatus(500);          // let Stripe retry later
+        return res.sendStatus(500);              // let Stripe retry
       }
 
       console.log("✅ plan set to", plan, "for user", data[0].id);
     }
 
-    /* 3. subscription cancelled → downgrade */
+    /* ─────────  subscription cancelled → downgrade  ───────── */
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object;
       const { data, error } = await supabase
@@ -180,15 +194,17 @@ app.post(
 
       if (error || !data.length) {
         console.error("❌ downgrade failed / sub not found:", error);
-        return res.sendStatus(500);          // let Stripe retry
+        return res.sendStatus(500);              // let Stripe retry
       }
 
       console.log("↩️  subscription cancelled for", sub.id);
     }
 
-    res.json({ received: true });             // ACK Stripe
+    /* 4. ACK Stripe so it stops retrying */
+    res.json({ received: true });
   }
 );
+
 
 /* ====================================================================
    2️⃣  CONSTANTS / HELPERS
