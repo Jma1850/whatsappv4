@@ -55,17 +55,21 @@ async function ensureCustomer(user) {
   const c = await stripe.customers.create({
     description: `TuCanChat — ${user.phone_number}`,
     email: user.email || undefined,
-    name : user.full_name || user.phone_number
+    name : user.full_name || user.phone_number,
+    metadata: { uid: user.id }          // store Supabase uid in Stripe
   });
 
-  /* synchronous upsert ⇒ row definitely has stripe_cust_id */
-  await supabase
+  /* atomic update ⇒ fail loudly if it doesn’t stick */
+  const { error } = await supabase
     .from("users")
-    .upsert(
-      { id: user.id, stripe_cust_id: c.id },
-      { onConflict: ["id"] }
-    )
-    .select();
+    .update({ stripe_cust_id: c.id })
+    .eq("id", user.id)
+    .single();
+
+  if (error) {
+    console.error("❌ Failed to persist stripe_cust_id:", error.message);
+    throw error;
+  }
 
   return c.id;
 }
@@ -79,12 +83,12 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
 
   const custId  = await ensureCustomer(user);
   const session = await stripe.checkout.sessions.create({
-    mode: tier === "life" ? "payment" : "subscription",
-    customer: custId,
-    line_items: [{ price, quantity: 1 }],
+    mode     : tier === "life" ? "payment" : "subscription",
+    customer : custId,
+    line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier }               // uid no longer required
+    metadata   : { tier, uid: user.id }   // keep uid for completeness
   });
 
   return session.url;
@@ -109,7 +113,7 @@ app.post(
       );
     } catch (err) {
       console.error("⚠️  Stripe signature failed:", err.message);
-      return res.sendStatus(400);          // tell Stripe to retry
+      return res.sendStatus(400);      // tell Stripe to retry
     }
 
     /* checkout complete → upgrade */
@@ -120,38 +124,42 @@ app.post(
         s.metadata.tier === "annual"  ? "ANNUAL"  :
         "LIFETIME";
 
-      try {
-        await supabase
-          .from("users")
-          .update({
-            plan,
-            free_used: 0,
-            stripe_sub_id: s.subscription     // null for lifetime
-          })
-          .eq("stripe_cust_id", s.customer);
-        console.log("✅ plan set to", plan, "for", s.customer);
-      } catch (dbErr) {
-        console.error("❌ Supabase update failed:", dbErr.message);
-        /* returning 200 so Stripe doesn’t keep retrying
-           change to res.sendStatus(500) if you prefer retries */
+      const { data, error } = await supabase
+        .from("users")
+        .update({
+          plan,
+          free_used    : 0,
+          stripe_sub_id: s.subscription    // null for lifetime
+        })
+        .eq("stripe_cust_id", s.customer)
+        .select();
+
+      if (error || !data.length) {
+        console.error("❌ Supabase update failed / user not found:", error);
+        return res.sendStatus(500);     // let Stripe retry later
       }
+
+      console.log("✅ plan set to", plan, "for", s.customer);
     }
 
     /* subscription cancelled → downgrade */
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object;
-      try {
-        await supabase
-          .from("users")
-          .update({ plan: "FREE" })
-          .eq("stripe_sub_id", sub.id);
-        console.log("↩️  subscription cancelled for", sub.id);
-      } catch (dbErr) {
-        console.error("❌ downgrade failed:", dbErr.message);
+      const { data, error } = await supabase
+        .from("users")
+        .update({ plan: "FREE" })
+        .eq("stripe_sub_id", sub.id)
+        .select();
+
+      if (error || !data.length) {
+        console.error("❌ downgrade failed / sub not found:", error);
+        return res.sendStatus(500);     // retry
       }
+
+      console.log("↩️  subscription cancelled for", sub.id);
     }
 
-    res.json({ received: true });   // ACK Stripe
+    res.json({ received: true });       // ACK Stripe
   }
 );
 
