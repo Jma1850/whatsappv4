@@ -56,7 +56,7 @@ async function ensureCustomer(user) {
     description: `TuCanChat — ${user.phone_number}`,
     email      : user.email      || undefined,
     name       : user.full_name  || user.phone_number,
-    metadata   : { uuid: user.id }        // keep Supabase uuid in Stripe
+    metadata   : { uuid: user.id }          // store Supabase uuid in Stripe
   });
 
   const { error } = await supabase
@@ -87,14 +87,14 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
     line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier, uuid: user.id }   // uuid for webhook fallback
+    metadata   : { tier, uuid: user.id }     // uuid for webhook fallback
   });
 
   return session.url;
 }
 
 /* ──────────────────────────────────────────────────────────────────────
-   Stripe webhook (must be above any JSON body-parser)
+   Stripe webhook  (must be above any JSON body-parser)
 ────────────────────────────────────────────────────────────────────── */
 const app = express();
 
@@ -115,7 +115,7 @@ app.post(
       return res.sendStatus(400);            // ask Stripe to retry
     }
 
-    /* 2. handle checkout completion */
+    /* 2. checkout complete → upgrade */
     if (event.type === "checkout.session.completed") {
       const s = event.data.object;
 
@@ -124,7 +124,6 @@ app.post(
         s.metadata.tier === "annual"  ? "ANNUAL"  :
         "LIFETIME";
 
-      /* values we’ll persist no matter which lookup succeeds */
       const updateFields = {
         plan,
         free_used     : 0,
@@ -132,29 +131,29 @@ app.post(
         stripe_cust_id: s.customer                // back-fill for next time
       };
 
-      let data, error;
+      let data = [], error;
 
-      /* 2-A. returning customers (stripe_cust_id already present) */
-      ({ data = [], error } = await supabase
+      /* 2-A. returning customers */
+      ({ data, error } = await supabase
         .from("users")
         .update(updateFields)
         .eq("stripe_cust_id", s.customer)
         .select());
 
-      /* 2-B. first-time customers created *after* the helper fix */
+      /* 2-B. first-timers after helper fix (uuid in session metadata) */
       if (!data.length && s.metadata?.uuid) {
-        ({ data = [], error } = await supabase
+        ({ data, error } = await supabase
           .from("users")
           .update(updateFields)
           .eq("id", s.metadata.uuid)
           .select());
       }
 
-      /* 2-C. first-time customers created *before* the helper fix   */
+      /* 2-C. first-timers before helper fix (uuid only on Customer) */
       if (!data.length) {
         const cust = await stripe.customers.retrieve(s.customer);
         if (cust?.metadata?.uuid) {
-          ({ data = [], error } = await supabase
+          ({ data, error } = await supabase
             .from("users")
             .update(updateFields)
             .eq("id", cust.metadata.uuid)
@@ -170,7 +169,7 @@ app.post(
       console.log("✅ plan set to", plan, "for user", data[0].id);
     }
 
-    /* 3. handle subscription cancellation */
+    /* 3. subscription cancelled → downgrade */
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object;
       const { data, error } = await supabase
@@ -190,7 +189,6 @@ app.post(
     res.json({ received: true });             // ACK Stripe
   }
 );
-
 
 /* ====================================================================
    2️⃣  CONSTANTS / HELPERS
