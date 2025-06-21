@@ -54,9 +54,9 @@ async function ensureCustomer(user) {
 
   const c = await stripe.customers.create({
     description: `TuCanChat — ${user.phone_number}`,
-    email: user.email || undefined,
-    name : user.full_name || user.phone_number,
-    metadata: { uid: user.id }          // store Supabase uid in Stripe
+    email      : user.email || undefined,
+    name       : user.full_name || user.phone_number,
+    metadata   : { uid: user.id }           // store Supabase uid in Stripe
   });
 
   /* atomic update ⇒ fail loudly if it doesn’t stick */
@@ -83,12 +83,12 @@ async function checkoutUrl(user, tier /* 'monthly' | 'annual' | 'life' */) {
 
   const custId  = await ensureCustomer(user);
   const session = await stripe.checkout.sessions.create({
-    mode     : tier === "life" ? "payment" : "subscription",
-    customer : custId,
+    mode       : tier === "life" ? "payment" : "subscription",
+    customer   : custId,
     line_items : [{ price, quantity: 1 }],
     success_url: "https://tucanchat.io/success",
     cancel_url : "https://tucanchat.io/cancel",
-    metadata   : { tier, uid: user.id }   // keep uid for completeness
+    metadata   : { tier, uid: user.id }     // keep uid for webhook fallback
   });
 
   return session.url;
@@ -113,7 +113,7 @@ app.post(
       );
     } catch (err) {
       console.error("⚠️  Stripe signature failed:", err.message);
-      return res.sendStatus(400);      // tell Stripe to retry
+      return res.sendStatus(400);          // tell Stripe to retry
     }
 
     /* checkout complete → upgrade */
@@ -124,22 +124,35 @@ app.post(
         s.metadata.tier === "annual"  ? "ANNUAL"  :
         "LIFETIME";
 
-      const { data, error } = await supabase
+      const updateFields = {
+        plan,
+        free_used     : 0,
+        stripe_sub_id : s.subscription ?? null, // null for lifetime
+        stripe_cust_id: s.customer              // ensure it’s stored
+      };
+
+      /* 1️⃣ try match by stripe_cust_id (returning customers) */
+      let { data, error } = await supabase
         .from("users")
-        .update({
-          plan,
-          free_used    : 0,
-          stripe_sub_id: s.subscription    // null for lifetime
-        })
+        .update(updateFields)
         .eq("stripe_cust_id", s.customer)
         .select();
 
-      if (error || !data.length) {
-        console.error("❌ Supabase update failed / user not found:", error);
-        return res.sendStatus(500);     // let Stripe retry later
+      /* 2️⃣ fall back to uid in metadata (first-time checkout) */
+      if (!data.length && s.metadata?.uid) {
+        ({ data, error } = await supabase
+          .from("users")
+          .update(updateFields)
+          .eq("id", s.metadata.uid)
+          .select());
       }
 
-      console.log("✅ plan set to", plan, "for", s.customer);
+      if (error || !data.length) {
+        console.error("❌ Supabase update failed / user not found:", error);
+        return res.sendStatus(500);        // let Stripe retry
+      }
+
+      console.log("✅ plan set to", plan, "for user", data[0].id);
     }
 
     /* subscription cancelled → downgrade */
@@ -153,15 +166,16 @@ app.post(
 
       if (error || !data.length) {
         console.error("❌ downgrade failed / sub not found:", error);
-        return res.sendStatus(500);     // retry
+        return res.sendStatus(500);        // retry
       }
 
       console.log("↩️  subscription cancelled for", sub.id);
     }
 
-    res.json({ received: true });       // ACK Stripe
+    res.json({ received: true });          // ACK Stripe
   }
 );
+
 
 /* ====================================================================
    2️⃣  CONSTANTS / HELPERS
