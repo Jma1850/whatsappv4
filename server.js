@@ -579,19 +579,24 @@ if (user.language_step === "gender") {
       .update({ voice_gender: g, language_step: "tutorial1" })
       .eq("phone_number", from);
 
-const done1 = await translate(
-  "Set-up complete! I am TucanChat, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Forward me an audio message from another chat you want translated into your language.",
-  user.target_lang
-);
-await sendMessage(from, done1);
+    /* message 1 — intro */
+    const msgIntro = await translate(
+      "Set-up complete! I am TucanChat, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages.",
+      user.target_lang
+    );
+    await sendMessage(from, msgIntro);
 
-/* reset tips in a separate bubble */
-const resetTips = await translate(
-  "✳️  Type *reset* anytime to restart everything.\n✳️  Type *reset source* to change only the language you receive messages in.",
-  user.target_lang
-);
-await sendMessage(from, resetTips);
-     
+    /* message 2 — reset tips */
+    const resetTips = await translate(RESET_HELP, user.target_lang);
+    await sendMessage(from, resetTips);
+
+    /* message 3 — first action prompt */
+    const firstAction = await translate(
+      "Let’s try it out! Forward me an audio message from another chat you want translated into your language.",
+      user.target_lang
+    );
+    await sendMessage(from, firstAction);
+
   } else {
     const retry = await translate(
       "❌ Reply 1 or 2.\n1️⃣ Male\n2️⃣ Female",
