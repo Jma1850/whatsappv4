@@ -553,9 +553,10 @@ if (user.language_step === "gender") {
       .update({ voice_gender: g, language_step: "tutorial1" })
       .eq("phone_number", from);
 
-    const done1 = await translate(
-      "Set-up complete! I am Tucan, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Send me an audio message you want to translate.",
-      user.target_lang
+   const done1 = await translate(
+  "Set-up complete! I am Tucan, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Forward me an audio message from another chat you want translated into your language.",
+  user.target_lang
+);
     );
     await sendMessage(from, done1);
   } else {
