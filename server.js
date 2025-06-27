@@ -308,7 +308,8 @@ async function translate(text,target){
       {role:"system",content:
         `You are a professional translator.
          Never translate the literal keyword "reset"; always leave it as the
-         lowercase English word "reset".
+         lowercase English word "reset".Never translate the literal keyword "reset source"; always leave it as the
+         lowercase English word "reset source".
          Translate everything else to ${target}. Return ONLY the translation.`},
        { role: "user",
         content: `Translate this into ${target}:\n\n${text}` }
@@ -459,6 +460,7 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
       source_lang: null,
       target_lang: null,
       voice_gender: null,
+       free_used    : 0 
     }).eq("phone_number", from);
 
     await sendMessage(from, WELCOME_MSG);
