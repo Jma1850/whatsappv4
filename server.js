@@ -630,7 +630,7 @@ const dest       = detected === user.target_lang ? user.source_lang : user.targe
 const translated = await translate(original, dest);
 
 /* usage + log */
-if (isFree) {
+if (isFree && user.language_step === "ready") {
   await supabase
     .from("users")
     .update({ free_used: user.free_used + 1 })
