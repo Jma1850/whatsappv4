@@ -543,27 +543,56 @@ if (user.language_step === "target") {
   return;
 }
 
-/* 4b. pick SOURCE language (the language you receive messages in) */
+/* 4b. pick SOURCE language (language you receive messages in) */
 if (user.language_step === "source") {
-  const choice = pickLang(text);
-  if (choice) {
-    if (choice.code === user.target_lang) {
-      await sendMessage(from, menuMsg("⚠️ Source must differ.\nLanguages:"));
-      return;
-    }
-    await supabase
-      .from("users")
-      .update({ source_lang: choice.code, language_step: "gender" })
-      .eq("phone_number", from);
+  const choice = pickLang(text);          // returns { code, name }
+  if (!choice) {
+    await sendMessage(from, menuMsg("❌ Reply 1-5.\nLanguages:"));
+    return;
+  }
 
-    const gPrompt = await translate(
-      "Choose the voice you want me to use when creating audio messages for you\n1️⃣ Male\n2️⃣ Female",
+  /* must differ from target */
+  if (choice.code === user.target_lang) {
+    await sendMessage(from, menuMsg("⚠️ Source must differ.\nLanguages:"));
+    return;
+  }
+
+  /* has the user already finished setup (came from “reset source”)? */
+  const alreadySetup = user.voice_gender && user.target_lang;
+
+  await supabase
+    .from("users")
+    .update({
+      source_lang   : choice.code,
+      language_step : alreadySetup ? "ready" : "gender"
+    })
+    .eq("phone_number", from);
+
+  /* ─────────────  reset-source path  ───────────── */
+  if (alreadySetup) {
+    /* 1. confirmation */
+    const done = await translate(
+      `Language change complete. You are now translating messages you receive in ${choice.name}.`,
       user.target_lang
     );
-    await sendMessage(from, gPrompt);
-  } else {
-    await sendMessage(from, menuMsg("❌ Reply 1-5.\nLanguages:"));
+    await sendMessage(from, done);
+
+    /* 2. reset-tips bubble */
+    const tips = await translate(RESET_HELP, user.target_lang);
+    await sendMessage(from, tips);
+
+    /* 3. ready prompt */
+    const readyTxt = await translate("I am ready to translate.", user.target_lang);
+    await sendMessage(from, readyTxt);
+    return;
   }
+
+  /* ─────────────  normal onboarding continues  ───────────── */
+  const gPrompt = await translate(
+    "Choose the voice you want me to use when creating audio messages for you\n1️⃣ Male\n2️⃣ Female",
+    user.target_lang
+  );
+  await sendMessage(from, gPrompt);
   return;
 }
 
