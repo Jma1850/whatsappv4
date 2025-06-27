@@ -668,6 +668,7 @@ if (tutorialFollow) {
     .eq("phone_number", from);
 }
 /* ===== end of onboarding + translation handler block ===== */
+} // closes handleIncoming
 
 /* ====================================================================
    4️⃣  Twilio entry  (ACK immediately)
