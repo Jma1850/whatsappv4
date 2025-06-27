@@ -619,7 +619,7 @@ if (user.language_step && user.language_step.startsWith("tutorial")) {
       next: "tutorial3",
     },
     tutorial3: {
-      msg: "You are all set! You have 10 messages for free, and then it is only $1.99/month",
+      msg: "Great! Now you know how to use TucanChat. You can also send me videos and I can translate the audio for you. You have 10 messages for free, and then it is only $1.99/month",
       next: "ready",
     },
   };
