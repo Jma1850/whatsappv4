@@ -527,10 +527,10 @@ if (user.language_step === "target") {
       choice.code
     );
     const menuRaw = `1️⃣ English 🇺🇸 – type 1
-2️⃣ Español 🇪🇸 – escribe 2
-3️⃣ Français 🇫🇷 – tapez 3
-4️⃣ Português 🇵🇹 – digite 4
-5️⃣ Deutsch  🇩🇪 – tippe 5`;
+2️⃣ Spanish 🇪🇸 – type 2
+3️⃣ French  🇫🇷 – type 3
+4️⃣ Portuguese 🇵🇹 – type 4
+5️⃣ German  🇩🇪 – type 5`;
      
     const menuTranslated = await translate(menuRaw, choice.code);
     await sendMessage(from, `${heading}\n${menuTranslated}`);
