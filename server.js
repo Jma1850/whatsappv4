@@ -279,6 +279,9 @@ Recieve a voice note or text you dont 100% understand?
 All without leaving WhatsApp.`;
 /* ─────────────────────────────────── */
 
+/* global config */
+const MEDIA_DELAY_MS = 3500; 
+
 /* audio helpers */
 const toWav = (i,o)=>new Promise((res,rej)=>
   ffmpeg(i).audioCodec("pcm_s16le")
@@ -655,17 +658,6 @@ if (num === 0) {                              // text-only incoming
   } catch (e) {
     console.error("TTS/upload error:", e.message);
   }
-}
-
-/* tutorial prompt after text-only incoming */
-if (tutorialFollow) {
-  await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
-  const follow = await translate(tutorialFollow.msg, user.target_lang);
-  await sendMessage(from, follow);
-  await supabase
-    .from("users")
-    .update({ language_step: tutorialFollow.next })
-    .eq("phone_number", from);
 }
 
 /* …and after voice / media incoming */
