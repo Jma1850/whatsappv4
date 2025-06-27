@@ -643,19 +643,31 @@ await logRow({
 });
 
 /* ───── reply flow ───── */
-if (num === 0) {
-  /* text-only incoming message */
+if (num === 0) {                              // text-only incoming
   await sendMessage(from, translated);
 
-  /* send deferred tutorial prompt (if any) */
-  if (tutorialFollow) {
-    const follow = await translate(tutorialFollow.msg, user.target_lang);
-    await sendMessage(from, follow);
-    await supabase
-      .from("users")
-      .update({ language_step: tutorialFollow.next })
-      .eq("phone_number", from);
+} else {                                      // voice / media incoming
+  await sendMessage(from, `🗣 ${original}`);  // 1. transcript
+  await sendMessage(from, translated);        // 2. translation
+  try {
+    const mp3 = await tts(translated, dest, user.voice_gender);
+    const pub = await uploadAudio(mp3);
+    await sendMessage(from, "", pub);         // 3. audio reply
+  } catch (e) {
+    console.error("TTS/upload error:", e.message);
   }
+}
+
+/* ───── deliver deferred tutorial prompt (if any) ───── */
+if (tutorialFollow) {
+  await new Promise(res => setTimeout(res, 1200));   // ⏳ 1.2-sec buffer
+  const follow = await translate(tutorialFollow.msg, user.target_lang);
+  await sendMessage(from, follow);
+  await supabase
+    .from("users")
+    .update({ language_step: tutorialFollow.next })
+    .eq("phone_number", from);
+}
 } else {
   /* voice / media incoming message */
   await sendMessage(from, `🗣 ${original}`);   // 1. transcript
