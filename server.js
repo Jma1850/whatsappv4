@@ -657,9 +657,20 @@ if (num === 0) {                              // text-only incoming
   }
 }
 
-/* ───── deliver deferred tutorial prompt (if any) ───── */
+/* tutorial prompt after text-only incoming */
 if (tutorialFollow) {
-  await new Promise(res => setTimeout(res, 1200));   // ⏳ 1.2-sec buffer
+  await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
+  const follow = await translate(tutorialFollow.msg, user.target_lang);
+  await sendMessage(from, follow);
+  await supabase
+    .from("users")
+    .update({ language_step: tutorialFollow.next })
+    .eq("phone_number", from);
+}
+
+/* …and after voice / media incoming */
+if (tutorialFollow) {
+  await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
   const follow = await translate(tutorialFollow.msg, user.target_lang);
   await sendMessage(from, follow);
   await supabase
