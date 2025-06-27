@@ -440,18 +440,23 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
 
   const isFree = !user.plan || user.plan === "FREE";
 
-  /* 1. pay-wall button replies */
-  if (/^[1-3]$/.test(lower) && isFree && user.free_used >= 10) {
-    const tier = lower === "1" ? "monthly" : lower === "2" ? "annual" : "life";
-    try {
-      const link = await checkoutUrl(user, tier);
-      await sendMessage(from, `Tap to pay → ${link}`);
-    } catch (e) {
-      console.error("Stripe checkout err:", e.message);
-      await sendMessage(from, "⚠️ Payment link error. Try again later.");
-    }
-    return;
+ /* 1. pay-wall button replies */
+if (/^[1-3]$/.test(lower)             // user typed 1, 2, or 3
+    && isFree
+    && user.free_used >= 10
+    && user.language_step === "ready") {   // ← add this guard
+  const tier = lower === "1" ? "monthly"
+            : lower === "2" ? "annual"
+            : "life";
+  try {
+    const link = await checkoutUrl(user, tier);
+    await sendMessage(from, `Tap to pay → ${link}`);
+  } catch (e) {
+    console.error("Stripe checkout err:", e.message);
+    await sendMessage(from, "⚠️ Payment link error. Try again later.");
   }
+  return;
+}
 
   /* 2. reset */
   if (/^(reset|change language)$/i.test(lower)) {
@@ -468,7 +473,7 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
   }
 
   /* 3. free-tier gate */
-  if (isFree && user.free_used >= 10) {
+  if (isFree && user.free_used >= 10 && user.language_step === "ready") {
     await sendMessage(
     from,
     paywallMsg[(user.target_lang || "en").toLowerCase()] || paywallMsg.en
