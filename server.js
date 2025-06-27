@@ -428,7 +428,10 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
     ({ data: user } = await supabase
       .from("users")
       .upsert(
-        { phone_number: from, language_step: "target", plan: "FREE", free_used: 0 },
+        { phone_number: from,
+          language_step: "target",
+          plan: "FREE",
+          free_used: 0 },
         { onConflict: ["phone_number"] }
       )
       .select("*")
@@ -440,47 +443,72 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
 
   const isFree = !user.plan || user.plan === "FREE";
 
- /* 1. pay-wall button replies */
-if (/^[1-3]$/.test(lower)             // user typed 1, 2, or 3
-    && isFree
-    && user.free_used >= 10
-    && user.language_step === "ready") {   // ← add this guard
-  const tier = lower === "1" ? "monthly"
-            : lower === "2" ? "annual"
-            : "life";
-  try {
-    const link = await checkoutUrl(user, tier);
-    await sendMessage(from, `Tap to pay → ${link}`);
-  } catch (e) {
-    console.error("Stripe checkout err:", e.message);
-    await sendMessage(from, "⚠️ Payment link error. Try again later.");
-  }
-  return;
-}
+  /* 1. quick-reset: ONLY the “language you receive messages in” */
+  if (/^reset source$/i.test(lower)) {
+    await supabase.from("users").update({
+      source_lang   : null,
+      language_step : "source",
+      // keep target_lang, voice_gender, free_used
+    }).eq("phone_number", from);
 
-  /* 2. reset */
+    const heading = await translate(
+      "Choose the language you receive messages in (the one you need translated):",
+      user.target_lang || "en"
+    );
+    const menuRaw = `1) English (en)
+2) Spanish (es)
+3) French  (fr)
+4) Portuguese (pt)
+5) German  (de)`;
+    const menuTranslated = await translate(menuRaw, user.target_lang || "en");
+
+    await sendMessage(from, `${heading}\n${menuTranslated}`);
+    return;                       // stop further processing
+  }
+
+  /* 2. pay-wall button replies (numbers 1–3) */
+  if (/^[1-3]$/.test(lower)                // user pressed a button
+      && isFree
+      && user.free_used >= 10
+      && user.language_step === "ready") { // only after onboarding
+    const tier = lower === "1" ? "monthly"
+              : lower === "2" ? "annual"
+              : "life";
+    try {
+      const link = await checkoutUrl(user, tier);
+      await sendMessage(from, `Tap to pay → ${link}`);
+    } catch (e) {
+      console.error("Stripe checkout err:", e.message);
+      await sendMessage(from, "⚠️ Payment link error. Try again later.");
+    }
+    return;
+  }
+
+  /* 3. full reset */
   if (/^(reset|change language)$/i.test(lower)) {
     await supabase.from("users").update({
-      language_step: "target",
-      source_lang: null,
-      target_lang: null,
-      voice_gender: null,
-       free_used    : 0 
+      language_step : "target",
+      source_lang   : null,
+      target_lang   : null,
+      voice_gender  : null,
+      free_used     : 0           // fresh allowance
     }).eq("phone_number", from);
 
     await sendMessage(from, WELCOME_MSG);
     return;
   }
 
-  /* 3. free-tier gate */
+  /* 4. free-tier gate for normal messages */
   if (isFree && user.free_used >= 10 && user.language_step === "ready") {
     await sendMessage(
-    from,
-    paywallMsg[(user.target_lang || "en").toLowerCase()] || paywallMsg.en
+      from,
+      paywallMsg[(user.target_lang || "en").toLowerCase()] || paywallMsg.en
     );
-;
     return;
   }
+
+  /* … onboarding wizard and rest of handleIncoming continue here … */
+
 
 /* 4. onboarding wizard ----------------------------------- */
 let tutorialFollow = null; // holds next tutorial prompt, if any
