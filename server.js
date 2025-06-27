@@ -611,7 +611,7 @@ if (user.language_step === "gender") {
 if (user.language_step && user.language_step.startsWith("tutorial")) {
   const map = {
     tutorial1: {
-      msg: "Now send me an audio message you want to send to a friend in your language",
+      msg: " Now record an audio note in your language—what you want to say. I’ll translate it into your friend’s language so you can forward it",
       next: "tutorial2",
     },
     tutorial2: {
