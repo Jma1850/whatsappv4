@@ -615,7 +615,7 @@ if (user.language_step && user.language_step.startsWith("tutorial")) {
       next: "tutorial2",
     },
     tutorial2: {
-      msg: "Forward that message ☝️ to your friend. Then send me a text in your language, or forward me a text in theirs. I’ll translate it for them—and any reply they send back—for you.”,
+      msg: "Forward that voice message ☝️ to your friend. Then send me a text in your language, or forward me a text in theirs. I’ll translate it for them—and any reply they send back—for you.”,
       next: "tutorial3",
     },
     tutorial3: {
