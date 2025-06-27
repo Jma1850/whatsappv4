@@ -694,7 +694,6 @@ if (tutorialFollow) {
 }
 
 /* ===== end of onboarding + translation handler block ===== */
-} // ← closes handleIncoming
 
 /* ====================================================================
    4️⃣  Twilio entry  (ACK immediately)
