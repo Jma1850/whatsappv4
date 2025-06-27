@@ -667,32 +667,6 @@ if (tutorialFollow) {
     .update({ language_step: tutorialFollow.next })
     .eq("phone_number", from);
 }
-  /* voice / media incoming message */
-  await sendMessage(from, `🗣 ${original}`);   // 1. transcript
-  await sendMessage(from, translated);         // 2. translation
-
-  try {
-    /* 3. voice reply */
-    const mp3 = await tts(translated, dest, user.voice_gender);
-    const pub = await uploadAudio(mp3);
-    await sendMessage(from, "", pub);          // send the MP3
-
-  } catch (e) {
-    console.error("TTS/upload error:", e.message);
-    // even if audio fails, we still proceed to tutorial prompt
-  }
-
-  /* send deferred tutorial prompt (if any) — always AFTER audio attempt */
-  if (tutorialFollow) {
-    const follow = await translate(tutorialFollow.msg, user.target_lang);
-    await sendMessage(from, follow);
-    await supabase
-      .from("users")
-      .update({ language_step: tutorialFollow.next })
-      .eq("phone_number", from);
-  }
-}
-
 /* ===== end of onboarding + translation handler block ===== */
 
 /* ====================================================================
