@@ -668,7 +668,6 @@ if (tutorialFollow) {
     .update({ language_step: tutorialFollow.next })
     .eq("phone_number", from);
 }
-} else {
   /* voice / media incoming message */
   await sendMessage(from, `🗣 ${original}`);   // 1. transcript
   await sendMessage(from, translated);         // 2. translation
