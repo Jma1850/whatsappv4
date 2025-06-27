@@ -455,11 +455,11 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
       "Choose the language you receive messages in (the one you need translated):",
       user.target_lang || "en"
     );
-    const menuRaw = `1) English (en)
-2) Spanish (es)
-3) French  (fr)
-4) Portuguese (pt)
-5) German  (de)`;
+    const menuRaw = `1️⃣ English 🇺🇸 – type 1
+2️⃣ Español 🇪🇸 – escribe 2
+3️⃣ Français 🇫🇷 – tapez 3
+4️⃣ Português 🇵🇹 – digite 4
+5️⃣ Deutsch  🇩🇪 – tippe 5`;
     const menuTranslated = await translate(menuRaw, user.target_lang || "en");
 
     await sendMessage(from, `${heading}\n${menuTranslated}`);
@@ -526,11 +526,12 @@ if (user.language_step === "target") {
       "Choose the language you receive messages in (the one you need translated):",
       choice.code
     );
-    const menuRaw = `1) English (en)
-2) Spanish (es)
-3) French (fr)
-4) Portuguese (pt)
-5) German (de)`;
+    const menuRaw = `1️⃣ English 🇺🇸 – type 1
+2️⃣ Español 🇪🇸 – escribe 2
+3️⃣ Français 🇫🇷 – tapez 3
+4️⃣ Português 🇵🇹 – digite 4
+5️⃣ Deutsch  🇩🇪 – tippe 5`;
+     
     const menuTranslated = await translate(menuRaw, choice.code);
     await sendMessage(from, `${heading}\n${menuTranslated}`);
   } else {
