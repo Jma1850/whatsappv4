@@ -484,17 +484,17 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
   }
 
  /* 4. onboarding wizard ----------------------------------- */
-/* 4a.  pick TARGET language (TuCanChat’s reply language) */
+let tutorialFollow = null;   // store any pending tutorial message
+
+/* 4a. pick TARGET language (TuCanChat’s reply language) */
 if (user.language_step === "target") {
   const choice = pickLang(text);
   if (choice) {
-    /* save target & advance */
     await supabase
       .from("users")
       .update({ target_lang: choice.code, language_step: "source" })
       .eq("phone_number", from);
 
-    /* build the “choose source language” prompt */
     const heading = await translate(
       "Choose the language you receive messages in (the one you need translated):",
       choice.code
@@ -505,8 +505,6 @@ if (user.language_step === "target") {
 4) Portuguese (pt)
 5) German (de)`;
     const menuTranslated = await translate(menuRaw, choice.code);
-
-    /* heading + menu in ONE message */
     await sendMessage(from, `${heading}\n${menuTranslated}`);
   } else {
     await sendMessage(
@@ -553,10 +551,10 @@ if (user.language_step === "gender") {
       .update({ voice_gender: g, language_step: "tutorial1" })
       .eq("phone_number", from);
 
-   const done1 = await translate(
-  "Set-up complete! I am TucanChat, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Forward me an audio message from another chat you want translated into your language.",
-  user.target_lang
-);
+    const done1 = await translate(
+      "Set-up complete! I am TucanChat, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Forward me an audio message from another chat you want translated into your language.",
+      user.target_lang
+    );
     await sendMessage(from, done1);
   } else {
     const retry = await translate(
@@ -568,9 +566,9 @@ if (user.language_step === "gender") {
   return;
 }
 
-/* 4d. interactive tutorial follow-ups */
+/* 4d. capture (but don’t send yet) tutorial follow-ups */
 if (user.language_step && user.language_step.startsWith("tutorial")) {
-  const tutorialMap = {
+  const map = {
     tutorial1: {
       msg: "Now send me an audio message you want to send to a friend in your language",
       next: "tutorial2",
@@ -584,79 +582,88 @@ if (user.language_step && user.language_step.startsWith("tutorial")) {
       next: "ready",
     },
   };
-
-  const step = tutorialMap[user.language_step];
-  if (step) {
-    const follow = await translate(step.msg, user.target_lang);
-    await sendMessage(from, follow);
-    await supabase
-      .from("users")
-      .update({ language_step: step.next })
-      .eq("phone_number", from);
-  }
-  return;
+  tutorialFollow = map[user.language_step];
+  // Do NOT return here—let the message flow to normal translation logic
 }
 
 /* fallback if setup not finished */
 if (!user.source_lang || !user.target_lang || !user.voice_gender) {
-  await sendMessage(
-    from,
-    "⚠️ Setup incomplete. Text *reset* to start over."
-  );
+  await sendMessage(from, "⚠️ Setup incomplete. Text *reset* to start over.");
   return;
 }
 
-  /* transcribe / detect */
-  let original="",detected="";
-  if(num>0&&mediaUrl){
-    const auth="Basic "+Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-    const resp=await fetch(mediaUrl,{headers:{Authorization:auth}});
-    const buf=await resp.buffer();
-    const ctype=resp.headers.get("content-type")||"";
-    const ext=ctype.includes("ogg")?".ogg":
-              ctype.includes("mpeg")?".mp3":
-              ctype.includes("mp4")||ctype.includes("m4a")?".m4a":".dat";
-    const raw=`/tmp/${uuid()}${ext}`,wav=raw.replace(ext,".wav");
-    fs.writeFileSync(raw,buf); await toWav(raw,wav);
-    try{
-      const r=await whisper(wav);
-      original=r.txt; detected=r.lang||(await detectLang(original)).slice(0,2);
-    }finally{ fs.unlinkSync(raw); fs.unlinkSync(wav); }
-  }else if(text){
-    original=text;
-    detected=(await detectLang(original)).slice(0,2);
+/* ───── transcribe / detect language ───── */
+let original = "", detected = "";
+if (num > 0 && mediaUrl) {
+  const auth = "Basic " + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+  const resp = await fetch(mediaUrl, { headers: { Authorization: auth } });
+  const buf  = await resp.buffer();
+  const ctype = resp.headers.get("content-type") || "";
+  const ext =
+    ctype.includes("ogg")  ? ".ogg" :
+    ctype.includes("mpeg") ? ".mp3" :
+    (ctype.includes("mp4") || ctype.includes("m4a")) ? ".m4a" : ".dat";
+  const raw = `/tmp/${uuid()}${ext}`;
+  const wav = raw.replace(ext, ".wav");
+  fs.writeFileSync(raw, buf);
+  await toWav(raw, wav);
+  try {
+    const r = await whisper(wav);
+    original = r.txt;
+    detected = r.lang || (await detectLang(original)).slice(0, 2);
+  } finally {
+    fs.unlinkSync(raw);
+    fs.unlinkSync(wav);
   }
-  if(!original){ await sendMessage(from,"⚠️ Send text or a voice note."); return; }
+} else if (text) {
+  original = text;
+  detected = (await detectLang(original)).slice(0, 2);
+}
+if (!original) {
+  await sendMessage(from, "⚠️ Send text or a voice note.");
+  return;
+}
 
-  const dest       = detected===user.target_lang ? user.source_lang : user.target_lang;
-  const translated = await translate(original,dest);
+const dest       = detected === user.target_lang ? user.source_lang : user.target_lang;
+const translated = await translate(original, dest);
 
-  /* usage + log */
-  if(isFree){
-    await supabase.from("users")
-      .update({free_used:user.free_used+1})
-      .eq("phone_number",from);
+/* usage + log */
+if (isFree) {
+  await supabase.from("users")
+    .update({ free_used: user.free_used + 1 })
+    .eq("phone_number", from);
+}
+await logRow({
+  phone_number:    from,
+  original_text:   original,
+  translated_text: translated,
+  language_from:   detected,
+  language_to:     dest,
+});
+
+/* ───── reply flow ───── */
+if (num === 0) {
+  await sendMessage(from, translated);               // text-only message
+} else {
+  await sendMessage(from, `🗣 ${original}`);         // 1. transcript
+  await sendMessage(from, translated);               // 2. translation
+  try {
+    const mp3 = await tts(translated, dest, user.voice_gender);
+    const pub = await uploadAudio(mp3);
+    await sendMessage(from, "", pub);                // 3. voice reply
+  } catch (e) {
+    console.error("TTS/upload error:", e.message);
   }
-  await logRow({
-    phone_number:from,
-    original_text:original,
-    translated_text:translated,
-    language_from:detected,
-    language_to:dest
-  });
+}
 
-  /* reply flow */
-  if(num===0){ await sendMessage(from,translated); return; }
-
-  await sendMessage(from,`🗣 ${original}`);     // 1
-  await sendMessage(from,translated);          // 2
-  try{
-    const mp3=await tts(translated,dest,user.voice_gender);
-    const pub=await uploadAudio(mp3);
-    await sendMessage(from,"",pub);            // 3 (audio only)
-  }catch(e){
-    console.error("TTS/upload error:",e.message);
-  }
+/* ───── deliver deferred tutorial prompt (if any) ───── */
+if (tutorialFollow) {
+  const follow = await translate(tutorialFollow.msg, user.target_lang);
+  await sendMessage(from, follow);
+  await supabase
+    .from("users")
+    .update({ language_step: tutorialFollow.next })
+    .eq("phone_number", from);
 }
 
 /* ====================================================================
