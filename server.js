@@ -483,7 +483,7 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
     return;
   }
 
-  /* 4. onboarding wizard ----------------------------------- */
+ /* 4. onboarding wizard ----------------------------------- */
 /* 4a.  pick TARGET language (TuCanChat’s reply language) */
 if (user.language_step === "target") {
   const choice = pickLang(text);
@@ -494,13 +494,9 @@ if (user.language_step === "target") {
       .update({ target_lang: choice.code, language_step: "source" })
       .eq("phone_number", from);
 
-    /* 1️⃣  send “How TuCanChat works” (translated) */
-    const how = await translate(HOW_TEXT, choice.code);
-    await sendMessage(from, how);
-
-    /* 2️⃣  build a two-part prompt  */
+    /* build the “choose source language” prompt */
     const heading = await translate(
-      "Choose the language you RECEIVE messages in:",
+      "Choose the language you receive messages in (the one you need translated):",
       choice.code
     );
     const menuRaw = `1) English (en)
@@ -510,7 +506,7 @@ if (user.language_step === "target") {
 5) German (de)`;
     const menuTranslated = await translate(menuRaw, choice.code);
 
-    /* 3️⃣  heading + menu in ONE message */
+    /* heading + menu in ONE message */
     await sendMessage(from, `${heading}\n${menuTranslated}`);
   } else {
     await sendMessage(
@@ -521,59 +517,94 @@ if (user.language_step === "target") {
   return;
 }
 
-
-
-  /* 4b. pick SOURCE language (user’s sending language) */
-  if (user.language_step === "source") {
-    const choice = pickLang(text);
-    if (choice) {
-      if (choice.code === user.target_lang) {
-        await sendMessage(from, menuMsg("⚠️ Source must differ.\nLanguages:"));
-        return;
-      }
-      await supabase.from("users")
-        .update({ source_lang: choice.code, language_step: "gender" })
-        .eq("phone_number", from);
-
-      const gPrompt = await translate(
-        "🔊 Choose your voice gender?\n1️⃣ Male\n2️⃣ Female",
-        user.target_lang
-      );
-      await sendMessage(from, gPrompt);
-    } else {
-      await sendMessage(from, menuMsg("❌ Reply 1-5.\nLanguages:"));
+/* 4b. pick SOURCE language (user’s sending language) */
+if (user.language_step === "source") {
+  const choice = pickLang(text);
+  if (choice) {
+    if (choice.code === user.target_lang) {
+      await sendMessage(from, menuMsg("⚠️ Source must differ.\nLanguages:"));
+      return;
     }
-    return;
-  }
+    await supabase
+      .from("users")
+      .update({ source_lang: choice.code, language_step: "gender" })
+      .eq("phone_number", from);
 
-  /* 4c. pick voice gender */
-  if (user.language_step === "gender") {
-    let g = null;
-    if (/^1$/.test(lower) || /male/i.test(lower))   g = "MALE";
-    if (/^2$/.test(lower) || /female/i.test(lower)) g = "FEMALE";
-
-    if (g) {
-      await supabase.from("users")
-        .update({ voice_gender: g, language_step: "ready" })
-        .eq("phone_number", from);
-
-      const done = await translate(
-        "✅ Setup complete! Send text or a voice note.",
-        user.target_lang
-      );
-      await sendMessage(from, done);
-    } else {
-      const retry = await translate(
-        "❌ Reply 1 or 2.\n1️⃣ Male\n2️⃣ Female",
-        user.target_lang
-      );
-      await sendMessage(from, retry);
-    }
-    return;
+    const gPrompt = await translate(
+      "Choose the voice you want me to use when creating audio messages for you\n1️⃣ Male\n2️⃣ Female",
+      user.target_lang
+    );
+    await sendMessage(from, gPrompt);
+  } else {
+    await sendMessage(from, menuMsg("❌ Reply 1-5.\nLanguages:"));
   }
-  if(!user.source_lang||!user.target_lang||!user.voice_gender){
-    await sendMessage(from,"⚠️ Setup incomplete. Text *reset* to start over.");return;
+  return;
+}
+
+/* 4c. pick voice gender */
+if (user.language_step === "gender") {
+  let g = null;
+  if (/^1$/.test(lower) || /male/i.test(lower))   g = "MALE";
+  if (/^2$/.test(lower) || /female/i.test(lower)) g = "FEMALE";
+
+  if (g) {
+    await supabase
+      .from("users")
+      .update({ voice_gender: g, language_step: "tutorial1" })
+      .eq("phone_number", from);
+
+    const done1 = await translate(
+      "Set-up complete! I am Tucan, your WhatsApp translation assistant. I am here to help with translating text, voice, and video messages. Let’s try it out! Send me an audio message you want to translate.",
+      user.target_lang
+    );
+    await sendMessage(from, done1);
+  } else {
+    const retry = await translate(
+      "❌ Reply 1 or 2.\n1️⃣ Male\n2️⃣ Female",
+      user.target_lang
+    );
+    await sendMessage(from, retry);
   }
+  return;
+}
+
+/* 4d. interactive tutorial follow-ups */
+if (user.language_step && user.language_step.startsWith("tutorial")) {
+  const tutorialMap = {
+    tutorial1: {
+      msg: "Now send me an audio message you want to send to a friend in your language",
+      next: "tutorial2",
+    },
+    tutorial2: {
+      msg: "Send the message ☝️ to a friend, and then send me a text message you want to translate",
+      next: "tutorial3",
+    },
+    tutorial3: {
+      msg: "You are all set! You have 10 messages for free, and then it is only $1.99/month",
+      next: "ready",
+    },
+  };
+
+  const step = tutorialMap[user.language_step];
+  if (step) {
+    const follow = await translate(step.msg, user.target_lang);
+    await sendMessage(from, follow);
+    await supabase
+      .from("users")
+      .update({ language_step: step.next })
+      .eq("phone_number", from);
+  }
+  return;
+}
+
+/* fallback if setup not finished */
+if (!user.source_lang || !user.target_lang || !user.voice_gender) {
+  await sendMessage(
+    from,
+    "⚠️ Setup incomplete. Text *reset* to start over."
+  );
+  return;
+}
 
   /* transcribe / detect */
   let original="",detected="";
