@@ -483,8 +483,8 @@ async function handleIncoming(from, text = "", num, mediaUrl) {
     return;
   }
 
- /* 4. onboarding wizard ----------------------------------- */
-let tutorialFollow = null;   // store any pending tutorial message
+/* 4. onboarding wizard ----------------------------------- */
+let tutorialFollow = null; // holds next tutorial prompt, if any
 
 /* 4a. pick TARGET language (TuCanChat’s reply language) */
 if (user.language_step === "target") {
@@ -515,7 +515,7 @@ if (user.language_step === "target") {
   return;
 }
 
-/* 4b. pick SOURCE language (user’s sending language) */
+/* 4b. pick SOURCE language (the language you receive messages in) */
 if (user.language_step === "source") {
   const choice = pickLang(text);
   if (choice) {
@@ -566,7 +566,7 @@ if (user.language_step === "gender") {
   return;
 }
 
-/* 4d. capture (but don’t send yet) tutorial follow-ups */
+/* 4d. capture (but defer) tutorial follow-ups */
 if (user.language_step && user.language_step.startsWith("tutorial")) {
   const map = {
     tutorial1: {
@@ -583,7 +583,7 @@ if (user.language_step && user.language_step.startsWith("tutorial")) {
     },
   };
   tutorialFollow = map[user.language_step];
-  // Do NOT return here—let the message flow to normal translation logic
+  // Do NOT return here – we still need to run translation logic
 }
 
 /* fallback if setup not finished */
@@ -629,7 +629,8 @@ const translated = await translate(original, dest);
 
 /* usage + log */
 if (isFree) {
-  await supabase.from("users")
+  await supabase
+    .from("users")
     .update({ free_used: user.free_used + 1 })
     .eq("phone_number", from);
 }
@@ -643,14 +644,14 @@ await logRow({
 
 /* ───── reply flow ───── */
 if (num === 0) {
-  await sendMessage(from, translated);               // text-only message
+  await sendMessage(from, translated);               // text-only reply
 } else {
   await sendMessage(from, `🗣 ${original}`);         // 1. transcript
   await sendMessage(from, translated);               // 2. translation
   try {
     const mp3 = await tts(translated, dest, user.voice_gender);
     const pub = await uploadAudio(mp3);
-    await sendMessage(from, "", pub);                // 3. voice reply
+    await sendMessage(from, "", pub);                // 3. audio reply
   } catch (e) {
     console.error("TTS/upload error:", e.message);
   }
@@ -665,6 +666,8 @@ if (tutorialFollow) {
     .update({ language_step: tutorialFollow.next })
     .eq("phone_number", from);
 }
+/* ===== end of onboarding + translation handler block ===== */
+} // ← closes handleIncoming
 
 /* ====================================================================
    4️⃣  Twilio entry  (ACK immediately)
