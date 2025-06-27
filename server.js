@@ -265,22 +265,12 @@ const WELCOME_MSG = `Welcome to TuCanChat🦜
 4️⃣ Eu falo português 🇵🇹 – digite 4
 5️⃣ Ich spreche Deutsch 🇩🇪 – tippe 5`;
 
-const HOW_TEXT =                  // kept in English; we’ll auto-translate later
-`📌 How TuCanChat works🦜
-Recieve a voice note or text you dont 100% understand?
-• Send it to me
-• I instantly:
-  1. Transcribe the message
-  2. Translate
-  3. Provide an audio reply in your language
-  4. Speak the reply in your own language; I’ll translate and creat a text and voice message you can forward to them
-• Type “reset” anytime to switch languages.
-
-All without leaving WhatsApp.`;
-/* ─────────────────────────────────── */
+/* onboarding helper */
+const RESET_HELP = `✳️  Type *reset* anytime to restart everything.
+✳️  Type *reset source* to change only the language you receive messages in.`;
 
 /* global config */
-const MEDIA_DELAY_MS = 3500; 
+const MEDIA_DELAY_MS = 3500;   // wait so MP3 lands before tutorial prompt
 
 /* audio helpers */
 const toWav = (i,o)=>new Promise((res,rej)=>
