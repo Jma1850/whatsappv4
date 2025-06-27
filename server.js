@@ -272,6 +272,14 @@ const RESET_HELP = `✳️  Type *reset* anytime to restart everything.
 /* global config */
 const MEDIA_DELAY_MS = 3500;   // wait so MP3 lands before tutorial prompt
 
+/* branding */
+const BRAND_TAG = "— created with tucanchat.io";
+
+/* helper: append the footer only when addTag is true */
+function maybeBrand(text, addTag) {
+  return addTag ? `${text}\n\n${BRAND_TAG}` : text;
+}
+
 /* audio helpers */
 const toWav = (i,o)=>new Promise((res,rej)=>
   ffmpeg(i).audioCodec("pcm_s16le")
@@ -699,11 +707,18 @@ if (num === 0) {                              // text-only incoming
   }
 }
 
-/* …and after voice / media incoming */
+/* ───── deliver deferred tutorial prompt (if any) ───── */
 if (tutorialFollow) {
-  await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
-  const follow = await translate(tutorialFollow.msg, user.target_lang);
-  await sendMessage(from, follow);
+  await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));   // wait so MP3 lands first
+
+  // ↓ replace your two existing lines (translate + sendMessage) with these ↓
+  const follow  = await translate(tutorialFollow.msg, user.target_lang);
+  const branded = maybeBrand(
+    follow,
+    isFree && tutorialFollow.msg.startsWith("Now send me an audio message")
+  );
+  await sendMessage(from, branded);
+
   await supabase
     .from("users")
     .update({ language_step: tutorialFollow.next })
