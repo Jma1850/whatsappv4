@@ -258,13 +258,12 @@ eine der folgenden Abo-Optionen:
 };
 
 /* ────────── new constants ────────── */
-const WELCOME_MSG =
-`Welcome to TuCanChat🦜
-1) I speak English – type 1
-2) Hablo Español – escribe 2
-3) Je parle français – tapez 3
-4) Eu falo português – digite 4
-5) Ich spreche Deutsch – tippe 5`;
+const WELCOME_MSG = `Welcome to TuCanChat🦜
+1️⃣ I speak English 🇺🇸 – type 1
+2️⃣ Hablo Español 🇪🇸 – escribe 2
+3️⃣ Je parle français 🇫🇷 – tapez 3
+4️⃣ Eu falo português 🇵🇹 – digite 4
+5️⃣ Ich spreche Deutsch 🇩🇪 – tippe 5`;
 
 const HOW_TEXT =                  // kept in English; we’ll auto-translate later
 `📌 How TuCanChat works🦜
